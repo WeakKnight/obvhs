@@ -1,4 +1,6 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use crate::{
     Boundable, BvhBuildParams,
@@ -23,6 +25,7 @@ pub fn build_cwbvh_from_tris(
     core_build_time: &mut Duration,
 ) -> CwBvh {
     let mut bvh2;
+    #[cfg(not(target_arch = "wasm32"))]
     let start_time;
     if config.pre_split {
         let mut largest_half_area = 0.0;
@@ -42,7 +45,8 @@ pub fn build_cwbvh_from_tris(
 
         avg_area /= triangles.len() as f32;
 
-        start_time = Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
+        { start_time = Instant::now(); }
 
         split_aabbs_preset(
             &mut aabbs,
@@ -59,7 +63,8 @@ pub fn build_cwbvh_from_tris(
             config.search_depth_threshold,
         );
     } else {
-        start_time = Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
+        { start_time = Instant::now(); }
         bvh2 = PlocBuilder::with_capacity(triangles.len()).build(
             config.ploc_search_distance,
             triangles,
@@ -73,7 +78,8 @@ pub fn build_cwbvh_from_tris(
     ReinsertionOptimizer::default().run(&mut bvh2, config.reinsertion_batch_ratio, None);
     let cwbvh = bvh2_to_cwbvh(&bvh2, config.max_prims_per_leaf.clamp(1, 3), true, false);
 
-    *core_build_time += start_time.elapsed();
+    #[cfg(not(target_arch = "wasm32"))]
+    { *core_build_time += start_time.elapsed(); }
 
     #[cfg(debug_assertions)]
     {
@@ -99,6 +105,7 @@ pub fn build_cwbvh<T: Boundable>(
     config: BvhBuildParams,
     core_build_time: &mut Duration,
 ) -> CwBvh {
+    #[cfg(not(target_arch = "wasm32"))]
     let start_time = Instant::now();
 
     let mut bvh2 = PlocBuilder::with_capacity(primitives.len()).build(
@@ -117,7 +124,8 @@ pub fn build_cwbvh<T: Boundable>(
         cwbvh.validate(primitives, false);
     }
 
-    *core_build_time += start_time.elapsed();
+    #[cfg(not(target_arch = "wasm32"))]
+    { *core_build_time += start_time.elapsed(); }
 
     cwbvh
 }

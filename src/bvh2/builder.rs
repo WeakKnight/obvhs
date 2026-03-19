@@ -1,4 +1,6 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use crate::{
     Boundable, BvhBuildParams, ploc::PlocBuilder, splits::split_aabbs_preset, triangle::Triangle,
@@ -20,6 +22,7 @@ pub fn build_bvh2_from_tris(
     core_build_time: &mut Duration,
 ) -> Bvh2 {
     let mut bvh2;
+    #[cfg(not(target_arch = "wasm32"))]
     let start_time;
     if config.pre_split {
         let mut largest_half_area = 0.0;
@@ -39,7 +42,8 @@ pub fn build_bvh2_from_tris(
 
         avg_area /= triangles.len() as f32;
 
-        start_time = Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
+        { start_time = Instant::now(); }
 
         split_aabbs_preset(
             &mut aabbs,
@@ -56,7 +60,8 @@ pub fn build_bvh2_from_tris(
             config.search_depth_threshold,
         );
     } else {
-        start_time = Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
+        { start_time = Instant::now(); }
         bvh2 = PlocBuilder::with_capacity(triangles.len()).build(
             config.ploc_search_distance,
             triangles,
@@ -80,7 +85,8 @@ pub fn build_bvh2_from_tris(
         None,
     );
 
-    *core_build_time += start_time.elapsed();
+    #[cfg(not(target_arch = "wasm32"))]
+    { *core_build_time += start_time.elapsed(); }
 
     #[cfg(debug_assertions)]
     {
@@ -105,6 +111,7 @@ pub fn build_bvh2<T: Boundable>(
     config: BvhBuildParams,
     core_build_time: &mut Duration,
 ) -> Bvh2 {
+    #[cfg(not(target_arch = "wasm32"))]
     let start_time = Instant::now();
 
     let mut bvh2 = PlocBuilder::with_capacity(primitives.len()).build(
@@ -127,7 +134,8 @@ pub fn build_bvh2<T: Boundable>(
         None,
     );
 
-    *core_build_time += start_time.elapsed();
+    #[cfg(not(target_arch = "wasm32"))]
+    { *core_build_time += start_time.elapsed(); }
 
     #[cfg(debug_assertions)]
     {

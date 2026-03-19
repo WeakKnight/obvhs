@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>obvhs-web — BVH on the GPU</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary-cyan: #00E5FF;
+      --primary-blue: #0091EA;
+      --primary-teal: #00BFA5;
+      --bg-darkest: #0D1117;
+      --bg-dark: #161B22;
+      --bg-medium: #1C2333;
+      --text-bright: #E6EDF3;
+      --text-muted: #8B949E;
+      --text-link: #58A6FF;
+      --success: #3FB950;
+      --error: #F85149;
+      --warning: #D29922;
+      --font-mono: 'Roboto Mono', monospace;
+    }
+
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      font-family: var(--font-mono);
+      background: var(--bg-darkest);
+      color: var(--text-bright);
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* ─── Top Navbar ─── */
+    .navbar {
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      background: rgba(22, 27, 34, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(0, 229, 255, 0.12);
+      z-index: 100;
+      flex-shrink: 0;
+    }
+
+    .navbar .logo {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--primary-cyan);
+      letter-spacing: 1px;
+      text-shadow: 0 0 12px rgba(0, 229, 255, 0.4);
+    }
+
+    .navbar .tabs {
+      display: flex;
+      gap: 4px;
+    }
+
+    .navbar .tab-btn {
+      padding: 8px 18px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      position: relative;
+      transition: color 0.2s;
+    }
+
+    .navbar .tab-btn:hover {
+      color: var(--text-bright);
+    }
+
+    .navbar .tab-btn.active {
+      color: var(--primary-cyan);
+    }
+
+    .navbar .tab-btn.active::after {
+      content: '';
+      position: absolute;
+      bottom: -1px;
+      left: 10%;
+      width: 80%;
+      height: 2px;
+      background: var(--primary-cyan);
+      box-shadow: 0 0 8px var(--primary-cyan);
+      border-radius: 1px;
+    }
+
+    /* ─── Main Area ─── */
+    .main-area {
+      flex: 1;
+      display: flex;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* ─── Side Panel ─── */
+    .side-panel {
+      width: 280px;
+      background: rgba(22, 27, 34, 0.75);
+      backdrop-filter: blur(12px);
+      border-right: 1px solid rgba(0, 229, 255, 0.08);
+      padding: 16px;
+      overflow-y: auto;
+      flex-shrink: 0;
+      z-index: 50;
+      transition: width 0.3s, padding 0.3s;
+    }
+
+    .side-panel.collapsed {
+      width: 48px;
+      padding: 16px 8px;
+      overflow: hidden;
+    }
+
+    .panel-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border: 1px solid rgba(0, 229, 255, 0.2);
+      border-radius: 6px;
+      background: rgba(0, 229, 255, 0.05);
+      color: var(--primary-cyan);
+      cursor: pointer;
+      font-size: 14px;
+      margin-bottom: 16px;
+      transition: background 0.2s;
+    }
+
+    .panel-toggle:hover {
+      background: rgba(0, 229, 255, 0.12);
+    }
+
+    .panel-section {
+      margin-bottom: 20px;
+    }
+
+    .panel-section h3 {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      margin-bottom: 12px;
+    }
+
+    .panel-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .panel-row label {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .panel-row input[type="range"] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 4px;
+      background: var(--bg-medium);
+      border-radius: 2px;
+      outline: none;
+    }
+
+    .panel-row input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      background: var(--primary-cyan);
+      border-radius: 50%;
+      cursor: pointer;
+      box-shadow: 0 0 6px rgba(0, 229, 255, 0.5);
+    }
+
+    .panel-row select {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      padding: 6px 10px;
+      background: var(--bg-medium);
+      color: var(--text-bright);
+      border: 1px solid rgba(0, 229, 255, 0.15);
+      border-radius: 4px;
+      outline: none;
+    }
+
+    .panel-row select:focus {
+      border-color: var(--primary-cyan);
+    }
+
+    .panel-btn {
+      width: 100%;
+      padding: 8px 0;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--bg-darkest);
+      background: linear-gradient(135deg, var(--primary-cyan), var(--primary-teal));
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: opacity 0.2s, box-shadow 0.2s;
+    }
+
+    .panel-btn:hover {
+      opacity: 0.9;
+      box-shadow: 0 0 16px rgba(0, 229, 255, 0.3);
+    }
+
+    /* ─── Canvas ─── */
+    .canvas-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-darkest);
+    }
+
+    #gpu-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: #000;
+    }
+
+    /* ─── Status Bar ─── */
+    .status-bar {
+      height: 36px;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      padding: 0 20px;
+      background: rgba(22, 27, 34, 0.85);
+      backdrop-filter: blur(12px);
+      border-top: 1px solid rgba(0, 229, 255, 0.08);
+      font-size: 12px;
+      color: var(--text-muted);
+      flex-shrink: 0;
+      z-index: 100;
+    }
+
+    .stat-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .stat-item .stat-label { color: var(--text-muted); }
+    .stat-item .stat-value {
+      color: var(--primary-cyan);
+      font-weight: 600;
+      min-width: 48px;
+      text-align: right;
+    }
+
+    /* ─── Loading Overlay ─── */
+    .loading-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: var(--bg-darkest);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      transition: opacity 0.5s;
+    }
+
+    .loading-overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .loading-spinner {
+      width: 48px;
+      height: 48px;
+      border: 3px solid var(--bg-medium);
+      border-top-color: var(--primary-cyan);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    .loading-text {
+      margin-top: 16px;
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(0, 229, 255, 0.15); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(0, 229, 255, 0.3); }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- Loading -->
+    <div class="loading-overlay" id="loading">
+      <div class="loading-spinner"></div>
+      <div class="loading-text">Initializing WebGPU & WASM…</div>
+    </div>
+
+    <!-- Navbar -->
+    <nav class="navbar">
+      <div class="logo">obvhs-web</div>
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="raytrace">Ray Tracing</button>
+        <button class="tab-btn" data-tab="physics">Physics Sim</button>
+      </div>
+    </nav>
+
+    <!-- Main -->
+    <div class="main-area">
+      <!-- Side Panel -->
+      <aside class="side-panel" id="sidePanel">
+        <button class="panel-toggle" id="panelToggle">◀</button>
+
+        <!-- BVH Params (shared) -->
+        <div class="panel-section">
+          <h3>BVH Parameters</h3>
+          <div class="panel-row">
+            <label>Search Distance: <span id="searchDistVal">14</span></label>
+            <input type="range" id="searchDist" min="1" max="32" value="14" />
+          </div>
+          <div class="panel-row">
+            <label>Build Quality</label>
+            <select id="buildQuality">
+              <option value="fastest">Fastest</option>
+              <option value="fast">Fast</option>
+              <option value="medium" selected>Medium</option>
+              <option value="slow">Slow</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Raytrace Params -->
+        <div class="panel-section" id="raytraceParams">
+          <h3>Render</h3>
+          <div class="panel-row">
+            <label>Resolution Scale: <span id="resScaleVal">1.0</span></label>
+            <input type="range" id="resScale" min="0.25" max="2.0" step="0.25" value="1.0" />
+          </div>
+        </div>
+
+        <!-- Physics Params (hidden by default) -->
+        <div class="panel-section" id="physicsParams" style="display:none;">
+          <h3>Physics</h3>
+          <div class="panel-row">
+            <label>Sphere Count: <span id="sphereCountVal">64</span></label>
+            <input type="range" id="sphereCount" min="8" max="512" step="8" value="64" />
+          </div>
+          <div class="panel-row">
+            <label>BVH Update Strategy</label>
+            <select id="bvhStrategy">
+              <option value="rebuild" selected>Rebuild</option>
+              <option value="reinsert">Reinsert</option>
+              <option value="partial_rebuild">Partial Rebuild</option>
+            </select>
+          </div>
+          <button class="panel-btn" id="addSphereBtn">+ Add Sphere</button>
+        </div>
+      </aside>
+
+      <!-- Canvas -->
+      <div class="canvas-wrap">
+        <canvas id="gpu-canvas"></canvas>
+      </div>
+    </div>
+
+    <!-- Status Bar -->
+    <div class="status-bar">
+      <div class="stat-item">
+        <span class="stat-label">BVH Build</span>
+        <span class="stat-value" id="statBuild">—</span>
+        <span class="stat-label">ms</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">GPU</span>
+        <span class="stat-value" id="statGpu">—</span>
+        <span class="stat-label">ms</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">FPS</span>
+        <span class="stat-value" id="statFps">—</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">Tris</span>
+        <span class="stat-value" id="statTris">—</span>
+      </div>
+      <div class="stat-item">
+        <span class="stat-label">Nodes</span>
+        <span class="stat-value" id="statNodes">—</span>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

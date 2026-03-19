@@ -1,0 +1,27 @@
+[package]
+name = "obvhs-wasm"
+version = "0.1.0"
+edition = "2024"
+description = "WebAssembly bindings for obvhs BVH library"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+obvhs = { path = "../.." }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
+glam = { version = ">=0.30, <0.32", features = ["bytemuck"] }
+web-sys = { version = "0.3", features = ["console"] }
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+
+

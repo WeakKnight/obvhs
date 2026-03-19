@@ -1,0 +1,2 @@
+// This directory will contain wasm-pack output.
+// Run `npm run build:wasm` from web/ to generate the WASM package here.

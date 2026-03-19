@@ -3,3 +3,11 @@
 Cargo.lock
 *_rend.png
 *_temp_testbed.rs
+
+# Web frontend
+web/node_modules/
+web/dist/
+web/src/wasm/pkg/
+
+# CodeBuddy
+.codebuddy/
