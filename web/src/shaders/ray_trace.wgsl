@@ -82,7 +82,7 @@ fn shade(ray: Ray, hit: RayHit) -> vec3<f32> {
 
     // Shadow ray
     let shadow_ray = make_ray(hit_pos + n * 0.001, light_dir, 0.001, 100.0);
-    let in_shadow = traverse_cwbvh_any(shadow_ray);
+    let in_shadow = trace_shadow_ray(shadow_ray);
     let shadow_factor = select(1.0, 0.3, in_shadow);
 
     // Base color from normal
@@ -95,6 +95,29 @@ fn shade(ray: Ray, hit: RayHit) -> vec3<f32> {
     return base_color * (ambient + diffuse);
 }
 
+// ─── Configuration ───
+const USE_SHORT_STACK: bool = true; // Set to true to use short stack traversal
+
+// ─── Ray Tracing Entry Points ───
+
+/// Main ray tracing function that selects between full stack and short stack traversal
+fn trace_ray(ray: Ray) -> RayHit {
+    if USE_SHORT_STACK {
+        return traverse_cwbvh_closest_short_stack(ray);
+    } else {
+        return traverse_cwbvh_closest(ray);
+    }
+}
+
+/// Shadow ray tracing function that selects between full stack and short stack traversal
+fn trace_shadow_ray(ray: Ray) -> bool {
+    if USE_SHORT_STACK {
+        return traverse_cwbvh_any_short_stack(ray);
+    } else {
+        return traverse_cwbvh_any(ray);
+    }
+}
+
 // ─── Compute Entry Point ───
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -103,7 +126,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if px >= camera.width || py >= camera.height { return; }
 
     let ray = generate_ray(px, py);
-    let hit = traverse_cwbvh_closest(ray);
+    let hit = trace_ray(ray);
     let color = shade(ray, hit);
 
     // Tone mapping (simple Reinhard)

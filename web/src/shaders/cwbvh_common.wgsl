@@ -155,3 +155,51 @@ fn load_triangle_v2(prim_id: u32) -> vec3<f32> {
     let base = prim_id * 12u;
     return vec3<f32>(triangles[base + 8u], triangles[base + 9u], triangles[base + 10u]);
 }
+
+// ─── Short Stack Traversal (Wide BVH Traversal with a Short Stack) ───
+// Implementation of the algorithm from Vaidyanathan et al., HPG 2019
+
+// Short stack constants
+const SHORT_STACK_SIZE: u32 = 5u;           // Reduced from 32 to 5 entries
+const MAX_BVH_DEPTH: u32 = 32u;             // Maximum BVH depth
+const TRAIL_BITS_PER_LEVEL: u32 = 4u;       // 4 bits per level for [0..8] counter
+const TRAIL_LEVELS_PER_U32: u32 = 8u;       // 8 levels per u32 (4 bits each)
+const TRAIL_ARRAY_SIZE: u32 = 4u;           // 4 u32s for 32 levels (128 bits total)
+
+// ─── Trail Management Functions ───
+
+/// Get the trail counter value for a given level
+fn trail_get(trail_data: array<u32, TRAIL_ARRAY_SIZE>, level: u32) -> u32 {
+    let word_idx = level / TRAIL_LEVELS_PER_U32;
+    let bit_offset = (level % TRAIL_LEVELS_PER_U32) * TRAIL_BITS_PER_LEVEL;
+    return (trail_data[word_idx] >> bit_offset) & 0xFu;
+}
+
+/// Set the trail counter value for a given level
+fn trail_set(trail_data: ptr<function, array<u32, TRAIL_ARRAY_SIZE>>, level: u32, value: u32) {
+    let word_idx = level / TRAIL_LEVELS_PER_U32;
+    let bit_offset = (level % TRAIL_LEVELS_PER_U32) * TRAIL_BITS_PER_LEVEL;
+    let mask = ~(0xFu << bit_offset);
+    let word = (*trail_data)[word_idx];
+    (*trail_data)[word_idx] = (word & mask) | ((value & 0xFu) << bit_offset);
+}
+
+/// Increment the trail counter for a given level
+fn trail_increment(trail_data: ptr<function, array<u32, TRAIL_ARRAY_SIZE>>, level: u32) {
+    let current = trail_get(*trail_data, level);
+    trail_set(trail_data, level, current + 1u);
+}
+
+/// Clear all trail counters below the given level (set to 0)
+fn trail_clear_below(trail_data: ptr<function, array<u32, TRAIL_ARRAY_SIZE>>, level: u32) {
+    for (var i: u32 = level + 1u; i < MAX_BVH_DEPTH; i = i + 1u) {
+        trail_set(trail_data, i, 0u);
+    }
+}
+
+/// Initialize the trail data to all zeros
+fn init_trail(trail_data: ptr<function, array<u32, TRAIL_ARRAY_SIZE>>) {
+    for (var i: u32 = 0u; i < TRAIL_ARRAY_SIZE; i = i + 1u) {
+        (*trail_data)[i] = 0u;
+    }
+}
