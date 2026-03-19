@@ -6,15 +6,18 @@
 // ─── Constants ───
 const BRANCHING: u32 = 8u;
 const EPSILON: f32 = 0.0001;
+const F32_EPSILON: f32 = 1.1920929e-7;
 const TRAVERSAL_STACK_SIZE: u32 = 32u;
 const INVALID_U32: u32 = 0xFFFFFFFFu;
 
 // ─── Data Types ───
 
+// Note: inv_direction removed to reduce register pressure (~2.5% faster on GPU).
+// Division is performed directly in intersect_ray_node using extent / direction.
+// See: tray_racing cwbvh_node_intersect comment on precalculating 1/dir.
 struct Ray {
     origin: vec3<f32>,
     direction: vec3<f32>,
-    inv_direction: vec3<f32>,
     tmin: f32,
     tmax: f32,
 };
@@ -44,8 +47,9 @@ struct Aabb {
 fn make_ray(origin: vec3<f32>, direction: vec3<f32>, tmin: f32, tmax: f32) -> Ray {
     var ray: Ray;
     ray.origin = origin;
-    ray.direction = direction;
-    ray.inv_direction = 1.0 / direction;
+    // Protect against zero-direction components to avoid NaN/INF in traversal.
+    // This avoids unnecessary node traversals when ray.direction.x/y/z == 0.0.
+    ray.direction = select(direction, vec3<f32>(F32_EPSILON), direction == vec3<f32>(0.0));
     ray.tmin = tmin;
     ray.tmax = tmax;
     return ray;
@@ -115,6 +119,37 @@ fn load_child_q(off: u32, child: u32, axis: u32, is_max: u32) -> u32 {
     let word_idx = base_word + (child >> 2u);
     let byte_shift = (child & 3u) * 8u;
     return (bvh_nodes[word_idx] >> byte_shift) & 0xFFu;
+}
+
+// ─── Batch Node Data Loading (2×4 structure) ───
+// Loads packed u32 words containing 4 children's data each.
+// This is much faster than per-child access — 12 reads instead of 48.
+//
+// Memory layout (words 6-19):
+//   word  6-7:  child_meta[0..3], child_meta[4..7]  (4 bytes packed per u32)
+//   word  8-9:  child_min_x[0..3], child_min_x[4..7]
+//   word 10-11: child_max_x[0..3], child_max_x[4..7]
+//   word 12-13: child_min_y[0..3], child_min_y[4..7]
+//   word 14-15: child_max_y[0..3], child_max_y[4..7]
+//   word 16-17: child_min_z[0..3], child_min_z[4..7]
+//   word 18-19: child_max_z[0..3], child_max_z[4..7]
+//
+// For half=0: children 0-3, for half=1: children 4-7
+
+/// Load packed child_meta for 4 children (half=0: children 0-3, half=1: children 4-7)
+fn load_meta4(off: u32, half: u32) -> u32 {
+    return bvh_nodes[off + 6u + half];
+}
+
+/// Load packed quantized bounds for 4 children
+/// axis: 0=x, 1=y, 2=z; is_max: false=min, true=max; half: 0=children 0-3, 1=children 4-7
+fn load_q4(off: u32, axis: u32, is_max: u32, half: u32) -> u32 {
+    return bvh_nodes[off + 8u + axis * 4u + is_max * 2u + half];
+}
+
+/// Extract j-th byte from a packed u32
+fn extract_byte(x: u32, j: u32) -> u32 {
+    return (x >> (j * 8u)) & 0xFFu;
 }
 
 // ─── Utility Functions ───

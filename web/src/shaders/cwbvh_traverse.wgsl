@@ -38,17 +38,20 @@ fn intersect_triangle(ray: Ray, prim_id: u32) -> f32 {
     return 3.402823466e+38; // F32_MAX as miss sentinel
 }
 
-// ─── Ray-Node Intersection (basic / non-SIMD path) ───
+// ─── Ray-Node Intersection (optimized 2×4 batch path) ───
 // Tests ray against all 8 quantized child AABBs of a CwBvhNode.
+// Uses 2×4 structure: processes children in two batches of 4.
+// Division by ray.direction is done directly (no precalculated inv_direction)
+// to reduce register pressure (~2.5% faster per tray_racing measurements).
 // Returns hit_mask: upper 8 bits = hit internal children, lower 24 bits = hit leaf primitives.
 fn intersect_ray_node(off: u32, ray: Ray, oct_inv4: u32) -> u32 {
     let p = load_node_p(off);
     let e = load_node_e(off);
     let extent = compute_extent(e);
 
-    // Transform ray to node's quantized space
-    let adjusted_ray_dir_inv = extent * ray.inv_direction;
-    let adjusted_ray_origin = (p - ray.origin) * ray.inv_direction;
+    // Direct division: reduces register pressure vs storing inv_direction
+    let adjusted_ray_dir_inv = extent / ray.direction;
+    let adjusted_ray_origin = (p - ray.origin) / ray.direction;
 
     let rdx = ray.direction.x < 0.0;
     let rdy = ray.direction.y < 0.0;
@@ -56,19 +59,27 @@ fn intersect_ray_node(off: u32, ray: Ray, oct_inv4: u32) -> u32 {
 
     var hit_mask: u32 = 0u;
 
-    for (var child: u32 = 0u; child < 8u; child = child + 1u) {
-        let cmeta = load_child_meta(off, child);
-        if cmeta == 0u { continue; }
+    // Process 8 children in two batches of 4 (matching CWBVH packed layout)
+    for (var i: u32 = 0u; i < 2u; i = i + 1u) {
+        // Load packed meta for 4 children at once
+        let meta4 = load_meta4(off, i);
 
-        // Load quantized AABB bounds
-        let q_lo_x = load_child_q(off, child, 0u, 0u);
-        let q_hi_x = load_child_q(off, child, 0u, 1u);
-        let q_lo_y = load_child_q(off, child, 1u, 0u);
-        let q_hi_y = load_child_q(off, child, 1u, 1u);
-        let q_lo_z = load_child_q(off, child, 2u, 0u);
-        let q_hi_z = load_child_q(off, child, 2u, 1u);
+        // Batch-compute inner mask and bit indices for all 4 children simultaneously
+        // using packed byte arithmetic (same as tray_racing)
+        let is_inner4 = (meta4 & (meta4 << 1u)) & 0x10101010u;
+        let inner_mask4 = (is_inner4 >> 4u) * 0xFFu;
+        let bit_index4 = (meta4 ^ (oct_inv4 & inner_mask4)) & 0x1F1F1F1Fu;
+        let child_bits4 = (meta4 >> 5u) & 0x07070707u;
 
-        // Swap min/max based on ray direction sign
+        // Load all quantized bounds for this half (4 children packed in each u32)
+        let q_lo_x = load_q4(off, 0u, 0u, i);
+        let q_hi_x = load_q4(off, 0u, 1u, i);
+        let q_lo_y = load_q4(off, 1u, 0u, i);
+        let q_hi_y = load_q4(off, 1u, 1u, i);
+        let q_lo_z = load_q4(off, 2u, 0u, i);
+        let q_hi_z = load_q4(off, 2u, 1u, i);
+
+        // Select near/far planes based on ray direction sign
         let x_min = select(q_lo_x, q_hi_x, rdx);
         let x_max = select(q_hi_x, q_lo_x, rdx);
         let y_min = select(q_lo_y, q_hi_y, rdy);
@@ -76,31 +87,33 @@ fn intersect_ray_node(off: u32, ray: Ray, oct_inv4: u32) -> u32 {
         let z_min = select(q_lo_z, q_hi_z, rdz);
         let z_max = select(q_hi_z, q_lo_z, rdz);
 
-        var tmin3 = vec3<f32>(f32(x_min), f32(y_min), f32(z_min));
-        var tmax3 = vec3<f32>(f32(x_max), f32(y_max), f32(z_max));
+        // Test each of the 4 children
+        for (var j: u32 = 0u; j < 4u; j = j + 1u) {
+            // Extract j-th byte from each packed u32
+            var tmin3 = vec3<f32>(
+                f32(extract_byte(x_min, j)),
+                f32(extract_byte(y_min, j)),
+                f32(extract_byte(z_min, j))
+            );
+            var tmax3 = vec3<f32>(
+                f32(extract_byte(x_max, j)),
+                f32(extract_byte(y_max, j)),
+                f32(extract_byte(z_max, j))
+            );
 
-        // Apply quantized-space transform
-        tmin3 = tmin3 * adjusted_ray_dir_inv + adjusted_ray_origin;
-        tmax3 = tmax3 * adjusted_ray_dir_inv + adjusted_ray_origin;
+            // Apply quantized-space transform
+            tmin3 = tmin3 * adjusted_ray_dir_inv + adjusted_ray_origin;
+            tmax3 = tmax3 * adjusted_ray_dir_inv + adjusted_ray_origin;
 
-        // Slab test
-        let tmin_val = max(max(tmin3.x, max(tmin3.y, tmin3.z)), EPSILON);
-        let tmax_val = min(min(tmax3.x, min(tmax3.y, tmax3.z)), ray.tmax);
+            // Slab test
+            let tmin_val = max(max(tmin3.x, max(tmin3.y, tmin3.z)), EPSILON);
+            let tmax_val = min(min(tmax3.x, min(tmax3.y, tmax3.z)), ray.tmax);
 
-        if tmin_val <= tmax_val {
-            // Decode child_meta bits
-            // Inner node: high 3 bits = 0b001, low 5 bits = slot_index + 24
-            // Leaf node: high 3 bits = unary prim count, low 5 bits = prim offset
-            let child_bits = (cmeta >> 5u) & 0x07u;
-            var bit_index = cmeta & 0x1Fu;
-
-            // For inner nodes, XOR with oct_inv4 to get traversal order
-            let is_inner = ((cmeta & 0x18u) == 0x18u); // bits 3&4 both set = inner
-            if is_inner {
-                bit_index = bit_index ^ (oct_inv4 & 0xFFu);
+            if tmin_val <= tmax_val {
+                let child_bits = extract_byte(child_bits4, j);
+                let bit_index = extract_byte(bit_index4, j);
+                hit_mask |= child_bits << bit_index;
             }
-
-            hit_mask |= child_bits << bit_index;
         }
     }
 
@@ -109,7 +122,7 @@ fn intersect_ray_node(off: u32, ray: Ray, oct_inv4: u32) -> u32 {
 
 // ─── CWBVH Traversal: Closest Hit ───
 // Traverses the BVH to find the closest triangle intersection.
-// Returns updated RayHit with primitive_id and t.
+// Loop order: node → triangle → stack (matches tray_racing for reduced loop overhead).
 fn traverse_cwbvh_closest(ray_in: Ray) -> RayHit {
     var ray = ray_in;
     var hit: RayHit;
@@ -119,34 +132,15 @@ fn traverse_cwbvh_closest(ray_in: Ray) -> RayHit {
     let oct_inv4 = ray_get_octant_inv4(ray.direction);
 
     // Traversal state
-    // current_group.x = child_base_idx, current_group.y = internal hit mask | imask
     var current_group = vec2<u32>(0u, 0x80000000u); // Start at root
-    var primitive_group = vec2<u32>(0u, 0u);
-
-    // Stack
     var stack: array<vec2<u32>, 32>;
     var stack_ptr: u32 = 0u;
 
     loop {
-        // ── Phase 1: Process all pending primitives ──
-        while primitive_group.y != 0u {
-            let local_prim_idx = firstLeadingBit(primitive_group.y);
-            primitive_group.y &= ~(1u << local_prim_idx);
+        var triangle_group: vec2<u32>;
 
-            let global_prim_idx = primitive_group.x + local_prim_idx;
-            let prim_id = primitive_indices[global_prim_idx];
-
-            let t = intersect_triangle(ray, prim_id);
-            if t < ray.tmax {
-                hit.primitive_id = prim_id;
-                hit.t = t;
-                ray.tmax = t;
-            }
-        }
-
-        // ── Phase 2: Process internal node group ──
+        // ── Phase 1: Process internal node group → produces triangle_group ──
         if (current_group.y & 0xFF000000u) != 0u {
-            // There are internal children to process
             let hits_imask = current_group.y;
             let child_index_offset = firstLeadingBit(hits_imask);
 
@@ -162,7 +156,6 @@ fn traverse_cwbvh_closest(ray_in: Ray) -> RayHit {
             // Compute actual child node index
             let slot_index = (child_index_offset - 24u) ^ (oct_inv4 & 0xFFu);
             let imask = hits_imask & 0xFFu;
-            // Count set bits below slot_index in imask to get relative offset
             let mask_below = imask & ((1u << slot_index) - 1u);
             let relative_index = countOneBits(mask_below);
             let child_node_index = current_group.x + relative_index;
@@ -177,19 +170,34 @@ fn traverse_cwbvh_closest(ray_in: Ray) -> RayHit {
                 load_child_base_idx(child_off),
                 (hitmask & 0xFF000000u) | child_imask
             );
-            primitive_group = vec2<u32>(
+            triangle_group = vec2<u32>(
                 load_primitive_base_idx(child_off),
                 hitmask & 0x00FFFFFFu
             );
         } else {
             // No internal children — triangle postponing for GPU
-            // Move any remaining leaf bits from current_group to primitive_group
-            primitive_group = current_group;
+            triangle_group = current_group;
             current_group = vec2<u32>(0u, 0u);
         }
 
+        // ── Phase 2: Process all pending primitives ──
+        while triangle_group.y != 0u {
+            let local_prim_idx = firstLeadingBit(triangle_group.y);
+            triangle_group.y &= ~(1u << local_prim_idx);
+
+            let global_prim_idx = triangle_group.x + local_prim_idx;
+            let prim_id = primitive_indices[global_prim_idx];
+
+            let t = intersect_triangle(ray, prim_id);
+            if t < ray.tmax {
+                hit.primitive_id = prim_id;
+                hit.t = t;
+                ray.tmax = t;
+            }
+        }
+
         // ── Phase 3: Stack management ──
-        if primitive_group.y == 0u && (current_group.y & 0xFF000000u) == 0u {
+        if (current_group.y & 0xFF000000u) == 0u {
             if stack_ptr == 0u {
                 break; // Traversal complete
             }
@@ -203,29 +211,17 @@ fn traverse_cwbvh_closest(ray_in: Ray) -> RayHit {
 
 // ─── CWBVH Traversal: Any Hit (shadow ray) ───
 // Returns true if any intersection is found.
+// Loop order: node → triangle → stack.
 fn traverse_cwbvh_any(ray_in: Ray) -> bool {
     var ray = ray_in;
     let oct_inv4 = ray_get_octant_inv4(ray.direction);
 
     var current_group = vec2<u32>(0u, 0x80000000u);
-    var primitive_group = vec2<u32>(0u, 0u);
     var stack: array<vec2<u32>, 32>;
     var stack_ptr: u32 = 0u;
 
     loop {
-        // Process primitives
-        while primitive_group.y != 0u {
-            let local_prim_idx = firstLeadingBit(primitive_group.y);
-            primitive_group.y &= ~(1u << local_prim_idx);
-
-            let global_prim_idx = primitive_group.x + local_prim_idx;
-            let prim_id = primitive_indices[global_prim_idx];
-
-            let t = intersect_triangle(ray, prim_id);
-            if t < ray.tmax {
-                return true; // Early exit on any hit
-            }
-        }
+        var triangle_group: vec2<u32>;
 
         // Process internal nodes
         if (current_group.y & 0xFF000000u) != 0u {
@@ -252,17 +248,31 @@ fn traverse_cwbvh_any(ray_in: Ray) -> bool {
                 load_child_base_idx(child_off),
                 (hitmask & 0xFF000000u) | child_imask
             );
-            primitive_group = vec2<u32>(
+            triangle_group = vec2<u32>(
                 load_primitive_base_idx(child_off),
                 hitmask & 0x00FFFFFFu
             );
         } else {
-            primitive_group = current_group;
+            triangle_group = current_group;
             current_group = vec2<u32>(0u, 0u);
         }
 
+        // Process triangles
+        while triangle_group.y != 0u {
+            let local_prim_idx = firstLeadingBit(triangle_group.y);
+            triangle_group.y &= ~(1u << local_prim_idx);
+
+            let global_prim_idx = triangle_group.x + local_prim_idx;
+            let prim_id = primitive_indices[global_prim_idx];
+
+            let t = intersect_triangle(ray, prim_id);
+            if t < ray.tmax {
+                return true; // Early exit on any hit
+            }
+        }
+
         // Stack
-        if primitive_group.y == 0u && (current_group.y & 0xFF000000u) == 0u {
+        if (current_group.y & 0xFF000000u) == 0u {
             if stack_ptr == 0u {
                 break;
             }
@@ -312,25 +322,14 @@ fn traverse_cwbvh_closest_short_stack(ray_in: Ray) -> RayHit {
     var stack_bot: u32 = 0u;
 
     var current_group = vec2<u32>(0u, 0x80000000u); // sentinel: root
-    var primitive_group = vec2<u32>(0u, 0u);
+    // Pending primitive group from restart (leaf hits at restart level)
+    var pending_prim = vec2<u32>(0u, 0u);
     var level: u32 = 0u;
 
     loop {
-        // ── Phase 1: Process pending primitives ──
-        while primitive_group.y != 0u {
-            let idx = firstLeadingBit(primitive_group.y);
-            primitive_group.y &= ~(1u << idx);
+        var triangle_group: vec2<u32>;
 
-            let prim_id = primitive_indices[primitive_group.x + idx];
-            let t = intersect_triangle(ray, prim_id);
-            if t < ray.tmax {
-                hit.primitive_id = prim_id;
-                hit.t = t;
-                ray.tmax = t;
-            }
-        }
-
-        // ── Phase 2: Process internal node group ──
+        // ── Phase 1: Process internal node group → produces triangle_group ──
         if (current_group.y & 0xFF000000u) != 0u {
             let hits_imask = current_group.y;
             let child_index_offset = firstLeadingBit(hits_imask);
@@ -347,14 +346,14 @@ fn traverse_cwbvh_closest_short_stack(ray_in: Ray) -> RayHit {
                 }
             }
 
-            // Compute child node index (identical to full-stack)
+            // Compute child node index
             let slot_index = (child_index_offset - 24u) ^ (oct_inv4 & 0xFFu);
             let imask = hits_imask & 0xFFu;
             let mask_below = imask & ((1u << slot_index) - 1u);
             let relative_index = countOneBits(mask_below);
             let child_node_index = current_group.x + relative_index;
 
-            // Update trail: record that we descended one more child at this level
+            // Update trail
             trail_increment(&trail, level);
             level += 1u;
 
@@ -367,18 +366,38 @@ fn traverse_cwbvh_closest_short_stack(ray_in: Ray) -> RayHit {
                 load_child_base_idx(child_off),
                 (hitmask & 0xFF000000u) | child_imask
             );
-            primitive_group = vec2<u32>(
+            triangle_group = vec2<u32>(
                 load_primitive_base_idx(child_off),
                 hitmask & 0x00FFFFFFu
             );
         } else {
             // No internal children — handle leaf primitives
-            primitive_group = current_group;
+            // Use pending_prim if available, otherwise use current_group (triangle postponing)
+            if pending_prim.y != 0u {
+                triangle_group = pending_prim;
+                pending_prim = vec2<u32>(0u, 0u);
+            } else {
+                triangle_group = current_group;
+            }
             current_group = vec2<u32>(0u, 0u);
         }
 
+        // ── Phase 2: Process pending primitives ──
+        while triangle_group.y != 0u {
+            let idx = firstLeadingBit(triangle_group.y);
+            triangle_group.y &= ~(1u << idx);
+
+            let prim_id = primitive_indices[triangle_group.x + idx];
+            let t = intersect_triangle(ray, prim_id);
+            if t < ray.tmax {
+                hit.primitive_id = prim_id;
+                hit.t = t;
+                ray.tmax = t;
+            }
+        }
+
         // ── Phase 3: Stack management ──
-        if primitive_group.y == 0u && (current_group.y & 0xFF000000u) == 0u {
+        if (current_group.y & 0xFF000000u) == 0u && pending_prim.y == 0u {
             if stack_top > stack_bot {
                 // Pop from circular stack
                 stack_top -= 1u;
@@ -392,7 +411,7 @@ fn traverse_cwbvh_closest_short_stack(ray_in: Ray) -> RayHit {
                 }
                 level = restart.level;
                 current_group = vec2<u32>(restart.child_base, restart.group_y);
-                primitive_group = vec2<u32>(restart.prim_base, restart.prim_hits);
+                pending_prim = vec2<u32>(restart.prim_base, restart.prim_hits);
                 // Reset stack
                 stack_top = 0u;
                 stack_bot = 0u;
@@ -416,20 +435,13 @@ fn traverse_cwbvh_any_short_stack(ray_in: Ray) -> bool {
     var stack_bot: u32 = 0u;
 
     var current_group = vec2<u32>(0u, 0x80000000u);
-    var primitive_group = vec2<u32>(0u, 0u);
+    var pending_prim = vec2<u32>(0u, 0u);
     var level: u32 = 0u;
 
     loop {
-        while primitive_group.y != 0u {
-            let idx = firstLeadingBit(primitive_group.y);
-            primitive_group.y &= ~(1u << idx);
-            let prim_id = primitive_indices[primitive_group.x + idx];
-            let t = intersect_triangle(ray, prim_id);
-            if t < ray.tmax {
-                return true;
-            }
-        }
+        var triangle_group: vec2<u32>;
 
+        // Process internal nodes
         if (current_group.y & 0xFF000000u) != 0u {
             let hits_imask = current_group.y;
             let child_index_offset = firstLeadingBit(hits_imask);
@@ -460,16 +472,33 @@ fn traverse_cwbvh_any_short_stack(ray_in: Ray) -> bool {
                 load_child_base_idx(child_off),
                 (hitmask & 0xFF000000u) | child_imask
             );
-            primitive_group = vec2<u32>(
+            triangle_group = vec2<u32>(
                 load_primitive_base_idx(child_off),
                 hitmask & 0x00FFFFFFu
             );
         } else {
-            primitive_group = current_group;
+            if pending_prim.y != 0u {
+                triangle_group = pending_prim;
+                pending_prim = vec2<u32>(0u, 0u);
+            } else {
+                triangle_group = current_group;
+            }
             current_group = vec2<u32>(0u, 0u);
         }
 
-        if primitive_group.y == 0u && (current_group.y & 0xFF000000u) == 0u {
+        // Process triangles
+        while triangle_group.y != 0u {
+            let idx = firstLeadingBit(triangle_group.y);
+            triangle_group.y &= ~(1u << idx);
+            let prim_id = primitive_indices[triangle_group.x + idx];
+            let t = intersect_triangle(ray, prim_id);
+            if t < ray.tmax {
+                return true;
+            }
+        }
+
+        // Stack management
+        if (current_group.y & 0xFF000000u) == 0u && pending_prim.y == 0u {
             if stack_top > stack_bot {
                 stack_top -= 1u;
                 current_group = stack[stack_top % SHORT_STACK_SIZE];
@@ -481,7 +510,7 @@ fn traverse_cwbvh_any_short_stack(ray_in: Ray) -> bool {
                 }
                 level = restart.level;
                 current_group = vec2<u32>(restart.child_base, restart.group_y);
-                primitive_group = vec2<u32>(restart.prim_base, restart.prim_hits);
+                pending_prim = vec2<u32>(restart.prim_base, restart.prim_hits);
                 stack_top = 0u;
                 stack_bot = 0u;
             }

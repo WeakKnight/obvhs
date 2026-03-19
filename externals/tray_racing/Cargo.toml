@@ -1,0 +1,78 @@
+[package]
+name = "tray_racing"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+wgpu = { version = "26.0", features = ["spirv", "vulkan-portability"] }
+
+obj = { version = "0.10", features = ["genmesh"] }
+futures = { version = "0.3", default-features = false, features = [
+    "std",
+    "executor",
+] }
+structopt = "0.3"
+bytemuck = "1"
+image = "0.24"
+winit = "0.29"
+tabled = "0.15"
+glam = { version = "0.31", features = ["bytemuck", "serde"] }
+ron = "0.8"
+serde = { version = "1", features = ["derive"] }
+rayon = "1.10"
+
+obvhs = { git = "https://github.com/DGriffin91/obvhs", features = [
+    "profile",
+    "profile-with-tracing",
+] }
+
+tracing = "0.1"
+tracing-subscriber = "0.3"
+profiling = "1.0"
+chrono = "0.4"
+csv = "1.3"
+svenstaro = { package = "bvh", version = "0.12", default-features = false, features = ["std"] }
+nalgebra = { version = "0.34" } # Only for svenstaro & parry3d bvh crates
+parry3d = { version = "0.26", features = ["simd-stable"] }
+serde_json = "1.0"
+tinybvh-rs = { version = "0.1.0-beta.2", optional = true } # No support for cwbvh traversal
+#tinybvh-rs = { git = "https://github.com/DGriffin91/tinybvh-rs", rev = "enable_cwbvh", optional = true }
+# Haven't been able to get CWBVH to work.
+# With `tinybvh @ 33f2158` I always get back prim 0
+# With `tinybvh @ c3972f9` I get back various prims but image looks like grey noise
+
+obvhs_embree = { path = "embree/", optional = true }
+embree4-sys = { version = "0.0.12", optional = true }
+embree4-rs = { git = "https://github.com/DGriffin91/embree4-rs", branch = "obvhs" }
+
+traversable = { path = "traversable/" }
+
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+
+# BVH building seems faster, but traversal seems slower vs just --release
+[profile.fast]
+inherits = "release"
+codegen-units = 1
+panic = "abort"
+lto = "fat"
+
+# Enable optimization in debug mode
+[profile.dev]
+opt-level = 3
+
+# Enable high optimizations for dependencies
+[profile.dev.package."*"]
+opt-level = 3
+
+
+[features]
+#default = ["tinybvh", "embree"]
+embree = ["dep:obvhs_embree", "dep:embree4-sys"]
+tinybvh = ["dep:tinybvh-rs"]
+
+# Traversal is always parallel
+parallel_build = ["obvhs/parallel", "svenstaro/rayon"]
