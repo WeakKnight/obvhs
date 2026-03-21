@@ -1,16 +1,16 @@
 # obvhs
 
-WebGPU + WASM 实现的 **Compressed Wide BVH (CWBVH)** 加速结构库。基于 [obvhs](https://github.com/DGriffin91/obvhs) Rust 库，通过 `wasm-pack` 编译为 WebAssembly，在浏览器中实现高性能 BVH 构建与 GPU 遍历。
+A **Compressed Wide BVH (CWBVH)** acceleration structure library for WebGPU + WASM. Built on the [obvhs](https://github.com/DGriffin91/obvhs) Rust library, compiled to WebAssembly via `wasm-pack` for high-performance BVH construction and GPU traversal in the browser.
 
 ## Features
 
-- **CWBVH (8-wide)** — 压缩宽 BVH，单节点存储 8 个子节点的量化 AABB
-- **TLAS / BLAS** — 双层加速结构，支持多实例场景
-- **Procedural Geometry** — 程序化几何（球体 SDF 等），通过 `blas_offsets` sentinel 区分
-- **Dynamic BVH** — 运行时插入 / 删除 / 重建 / refit
-- **GPU Collision Detection** — 基于 BVH 的 AABB 宽相碰撞检测
-- **Zero-copy Upload** — WASM 线性内存 → GPU Buffer 零拷贝上传
-- **WGSL Shaders** — 内置 CWBVH 遍历、光线追踪、碰撞检测 shader 源码
+- **CWBVH (8-wide)** — Compressed Wide BVH storing quantized AABBs for 8 child nodes per node
+- **TLAS / BLAS** — Two-level acceleration structure supporting multi-instance scenes
+- **Procedural Geometry** — Procedural geometry (sphere SDFs, etc.) via `blas_offsets` sentinel values
+- **Dynamic BVH** — Runtime insert / delete / rebuild / refit
+- **GPU Collision Detection** — BVH-based AABB broad-phase collision detection
+- **Zero-copy Upload** — WASM linear memory → GPU Buffer zero-copy upload
+- **WGSL Shaders** — Built-in CWBVH traversal, ray tracing, and collision detection shader sources
 
 ## Install
 
@@ -18,7 +18,7 @@ WebGPU + WASM 实现的 **Compressed Wide BVH (CWBVH)** 加速结构库。基于
 npm install obvhs
 ```
 
-> **前置条件：** 使用前需要构建 WASM 模块（需要 [Rust](https://rustup.rs/) + [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/)）：
+> **Prerequisites:** Before use, you need to build the WASM module (requires [Rust](https://rustup.rs/) + [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/)):
 >
 > ```bash
 > cd crates/obvhs-wasm
@@ -27,29 +27,29 @@ npm install obvhs
 
 ## Quick Start
 
-### 方式一：使用 Vite（推荐）
+### Option 1: Using Vite (Recommended)
 
-配合 `vite-plugin-wasm` 使用，WASM 自动处理：
+Works seamlessly with `vite-plugin-wasm` — WASM is handled automatically:
 
 ```typescript
 import { BvhManager, BufferManager, BuildQuality } from 'obvhs';
 
 const bvhManager = new BvhManager();
-await bvhManager.init(); // 自动加载 bundled WASM
+await bvhManager.init(); // Automatically loads bundled WASM
 ```
 
-### 方式二：自行管理 WASM 加载
+### Option 2: Manual WASM Loading
 
-适用于 webpack / esbuild / 原生 ESM 等：
+For webpack / esbuild / native ESM and other environments:
 
 ```typescript
 import { BvhManager, BufferManager, BuildQuality } from 'obvhs';
 import initWasm, * as wasmExports from 'obvhs/wasm';
 
-// 1. 手动初始化 WASM（传入你的 .wasm 文件 URL）
+// 1. Manually initialize WASM (provide your .wasm file URL)
 await initWasm('/path/to/obvhs_wasm_bg.wasm');
 
-// 2. 传入已初始化的模块
+// 2. Pass the initialized module
 const bvhManager = new BvhManager();
 await bvhManager.init({ wasmModule: wasmExports as any });
 ```
@@ -58,41 +58,41 @@ await bvhManager.init({ wasmModule: wasmExports as any });
 
 ## Basic Example
 
-### 单层 BVH — 构建 + GPU 上传
+### Single-level BVH — Build + GPU Upload
 
 ```typescript
 import { BvhManager, BufferManager, BuildQuality } from 'obvhs';
 
-// 1. 初始化
+// 1. Initialize
 const bvhManager = new BvhManager();
 await bvhManager.init();
 
-// 2. 准备三角形数据 (每 9 个 float = 1 个三角形: v0.xyz, v1.xyz, v2.xyz)
+// 2. Prepare triangle data (every 9 floats = 1 triangle: v0.xyz, v1.xyz, v2.xyz)
 const triangles = new Float32Array([
   -1, 0, 0,   1, 0, 0,   0, 1, 0,  // Triangle 0
    0, 0, -1,  0, 0, 1,   0, 1, 0,  // Triangle 1
 ]);
 
-// 3. 构建 CWBVH
+// 3. Build CWBVH
 bvhManager.buildCwBvh(triangles, BuildQuality.Medium);
 console.log(`Build: ${bvhManager.lastBuildTimeMs}ms, ${bvhManager.nodeCount} nodes`);
 
-// 4. 上传到 GPU
+// 4. Upload to GPU
 const bufferManager = new BufferManager(device);
 const { nodes, indices, triangles: triBuf } = bvhManager.uploadToGpu(bufferManager);
 
-// 5. 在 compute shader 中绑定这些 buffer:
+// 5. Bind these buffers in your compute shader:
 //    @group(0) @binding(0) bvh_nodes
 //    @group(0) @binding(1) primitive_indices
 //    @group(0) @binding(2) triangles
 ```
 
-### TLAS / BLAS — 多实例场景 + 程序化几何
+### TLAS / BLAS — Multi-instance Scene + Procedural Geometry
 
 ```typescript
 import { BvhManager, BufferManager, BuildQuality, generateCornellBoxAt } from 'obvhs';
 
-// 1. 准备多个 BLAS 实例
+// 1. Prepare multiple BLAS instances
 const blasTriArrays: Float32Array[] = [];
 const proceduralAabbs: number[] = [];
 const proceduralInstanceIndices: number[] = [];
@@ -101,10 +101,10 @@ for (let i = 0; i < 10; i++) {
   const center: [number, number, number] = [i * 3, 0, 0];
   const box = generateCornellBoxAt(center);
 
-  // 三角形网格 BLAS（instance_index = i * 2）
+  // Triangle mesh BLAS (instance_index = i * 2)
   blasTriArrays.push(box.triangles);
 
-  // 程序化球体 BLAS（instance_index = i * 2 + 1）
+  // Procedural sphere BLAS (instance_index = i * 2 + 1)
   const radius = 0.2 + Math.random() * 0.15;
   const sc = box.sphereCenter;
   proceduralAabbs.push(
@@ -114,7 +114,7 @@ for (let i = 0; i < 10; i++) {
   proceduralInstanceIndices.push(i * 2 + 1);
 }
 
-// 2. 构建 TLAS
+// 2. Build TLAS
 const bvhManager = new BvhManager();
 await bvhManager.init();
 
@@ -125,12 +125,12 @@ bvhManager.buildTlasScene(
   BuildQuality.Medium
 );
 
-// 3. 上传到 GPU
+// 3. Upload to GPU
 const bufferManager = new BufferManager(device);
 const { nodes, indices, triangles, blasOffsets } = bvhManager.uploadTlasToGpu(bufferManager);
 ```
 
-### 动态 BVH — 运行时更新
+### Dynamic BVH — Runtime Updates
 
 ```typescript
 import { BvhManager, BufferManager, BuildQuality } from 'obvhs';
@@ -138,19 +138,19 @@ import { BvhManager, BufferManager, BuildQuality } from 'obvhs';
 const bvhManager = new BvhManager();
 await bvhManager.init();
 
-// 保留 BVH2 以支持动态操作
+// Keep BVH2 to enable dynamic operations
 bvhManager.buildCwBvh(triangles, BuildQuality.Medium, /* keepBvh2 */ true);
 
 const bvh = bvhManager.instance!;
 
-// 插入新三角形
+// Insert a new triangle
 const primId = bvh.insert_triangle(0, 0, 0, 1, 0, 0, 0, 1, 0);
 
-// 修改图元 AABB 并重插入
+// Resize primitive AABB and reinsert
 bvh.resize_primitive(primId, -0.5, -0.5, -0.5, 1.5, 1.5, 0.5);
 bvh.reinsert_primitive(primId);
 
-// 批量更新
+// Batch update
 const ids = new Uint32Array([0, 1, 2]);
 const aabbs = new Float32Array([
   -1, -1, -1, 1, 1, 1,   // id0
@@ -159,23 +159,23 @@ const aabbs = new Float32Array([
 ]);
 bvh.batch_update_and_reinsert(ids, aabbs);
 
-// 转换回 CWBVH 并上传 GPU
+// Convert back to CWBVH and upload to GPU
 bvhManager.convertBvh2ToCwbvh();
 
 const bufferManager = new BufferManager(device);
 bvhManager.uploadToGpu(bufferManager);
 ```
 
-### 使用内置 Shader
+### Using Built-in Shaders
 
 ```typescript
 import {
-  singleBvhShaderSrc,  // 单层 BVH: common + traverse + ray_trace
+  singleBvhShaderSrc,  // Single-level BVH: common + traverse + ray_trace
   tlasBvhShaderSrc,     // TLAS/BLAS: common + traverse + tlas_traverse + ray_trace
-  collisionShaderSrc,   // 碰撞检测: common + collision
+  collisionShaderSrc,   // Collision detection: common + collision
 } from 'obvhs';
 
-// 注入 trace 函数实现，替换 shader 中的占位符
+// Inject trace function implementation, replacing the placeholder in the shader
 const singleBvhShader = singleBvhShaderSrc.replace('/*TRACE_IMPL*/', `
 fn trace_ray(ray: Ray) -> RayHit {
     return traverse_cwbvh_closest(ray);
@@ -185,7 +185,7 @@ fn trace_shadow_ray(ray: Ray) -> bool {
 }
 `);
 
-// 也可以使用独立的 shader 源码自行组合
+// You can also use individual shader sources to compose your own
 import { cwbvhCommonSrc, cwbvhTraverseSrc, collisionSrc } from 'obvhs';
 const customShader = cwbvhCommonSrc + '\n' + cwbvhTraverseSrc + '\n' + yourCustomShader;
 ```
@@ -196,7 +196,7 @@ const customShader = cwbvhCommonSrc + '\n' + cwbvhTraverseSrc + '\n' + yourCusto
 
 ### `BvhManager`
 
-BVH 核心管理类，封装 WASM 模块的加载、构建和 GPU 上传。
+Core BVH management class wrapping WASM module loading, building, and GPU upload.
 
 ```typescript
 import { BvhManager, BuildQuality } from 'obvhs';
@@ -204,25 +204,25 @@ import { BvhManager, BuildQuality } from 'obvhs';
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `init()` | `(options?: BvhManagerInitOptions) → Promise<void>` | 加载并初始化 WASM 模块 |
-| `buildCwBvh()` | `(triangles: Float32Array, quality?: BuildQuality, keepBvh2?: boolean) → void` | 从三角形数组构建 CWBVH |
-| `uploadToGpu()` | `(bufferManager: BufferManager) → { nodes, indices, triangles }` | 上传单层 BVH 到 GPU |
-| `rebuild()` | `(quality?: BuildQuality) → void` | 完全重建 CWBVH |
-| `convertBvh2ToCwbvh()` | `() → void` | 将动态修改后的 BVH2 转换为 CWBVH |
-| `getTotalAabb()` | `() → { min: [x,y,z], max: [x,y,z] }` | 获取整棵 BVH 的包围盒 |
-| `buildTlasScene()` | `(blasTriArrays, proceduralAabbs?, proceduralInstanceIndices?, quality?) → void` | 构建 TLAS 多实例场景 |
-| `uploadTlasToGpu()` | `(bufferManager: BufferManager) → { nodes, indices, triangles, blasOffsets }` | 上传 TLAS 数据到 GPU |
-| `destroy()` | `() → void` | 释放所有 WASM 资源 |
+| `init()` | `(options?: BvhManagerInitOptions) → Promise<void>` | Load and initialize the WASM module |
+| `buildCwBvh()` | `(triangles: Float32Array, quality?: BuildQuality, keepBvh2?: boolean) → void` | Build CWBVH from a triangle array |
+| `uploadToGpu()` | `(bufferManager: BufferManager) → { nodes, indices, triangles }` | Upload single-level BVH to GPU |
+| `rebuild()` | `(quality?: BuildQuality) → void` | Fully rebuild the CWBVH |
+| `convertBvh2ToCwbvh()` | `() → void` | Convert a dynamically modified BVH2 to CWBVH |
+| `getTotalAabb()` | `() → { min: [x,y,z], max: [x,y,z] }` | Get the bounding box of the entire BVH |
+| `buildTlasScene()` | `(blasTriArrays, proceduralAabbs?, proceduralInstanceIndices?, quality?) → void` | Build a TLAS multi-instance scene |
+| `uploadTlasToGpu()` | `(bufferManager: BufferManager) → { nodes, indices, triangles, blasOffsets }` | Upload TLAS data to GPU |
+| `destroy()` | `() → void` | Release all WASM resources |
 
 **Properties:**
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `lastBuildTimeMs` | `number` | 上次构建耗时（毫秒） |
-| `nodeCount` | `number` | BVH 节点数量 |
-| `triangleCount` | `number` | 三角形数量 |
-| `tlasStart` | `number` | TLAS 节点在 buffer 中的起始偏移 |
-| `instance` | `WasmCwBvhInstance \| null` | 底层 WASM BVH 实例（可直接调用动态操作） |
+| `lastBuildTimeMs` | `number` | Last build time in milliseconds |
+| `nodeCount` | `number` | Number of BVH nodes |
+| `triangleCount` | `number` | Number of triangles |
+| `tlasStart` | `number` | Starting offset of TLAS nodes in the buffer |
+| `instance` | `WasmCwBvhInstance \| null` | Underlying WASM BVH instance (for direct dynamic operations) |
 
 #### `BvhManagerInitOptions`
 
@@ -237,11 +237,11 @@ interface BvhManagerInitOptions {
 
 ```typescript
 enum BuildQuality {
-  Fastest  = 0,  // SAH binning, 最快
+  Fastest  = 0,  // SAH binning, fastest
   Fast     = 1,
-  Medium   = 2,  // 推荐默认值
+  Medium   = 2,  // Recommended default
   Slow     = 3,
-  VerySlow = 4,  // 最高质量
+  VerySlow = 4,  // Highest quality
 }
 ```
 
@@ -249,7 +249,7 @@ enum BuildQuality {
 
 ### `BufferManager`
 
-GPU Storage Buffer 管理器，支持从 WASM 线性内存零拷贝上传。
+GPU Storage Buffer manager with zero-copy upload from WASM linear memory.
 
 ```typescript
 import { BufferManager } from 'obvhs';
@@ -258,30 +258,30 @@ import { BufferManager } from 'obvhs';
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `constructor()` | `(device: GPUDevice)` | |
-| `uploadBuffer()` | `(name: string, data: Uint8Array, usage?: number) → GPUBuffer` | 上传 / 更新 storage buffer |
-| `uploadFromWasm()` | `(name, wasmMemory, ptr, byteLen, usage?) → GPUBuffer` | 从 WASM 内存零拷贝上传 |
-| `getBuffer()` | `(name: string) → GPUBuffer \| undefined` | 按名称获取已有 buffer |
-| `createUniformBuffer()` | `(name: string, data: ArrayBuffer) → GPUBuffer` | 创建 uniform buffer |
-| `createStorageBuffer()` | `(name: string, size: number, readWrite?: boolean) → GPUBuffer` | 创建空 storage buffer |
-| `destroy()` | `() → void` | 销毁所有 buffer |
+| `uploadBuffer()` | `(name: string, data: Uint8Array, usage?: number) → GPUBuffer` | Upload / update a storage buffer |
+| `uploadFromWasm()` | `(name, wasmMemory, ptr, byteLen, usage?) → GPUBuffer` | Zero-copy upload from WASM memory |
+| `getBuffer()` | `(name: string) → GPUBuffer \| undefined` | Get an existing buffer by name |
+| `createUniformBuffer()` | `(name: string, data: ArrayBuffer) → GPUBuffer` | Create a uniform buffer |
+| `createStorageBuffer()` | `(name: string, size: number, readWrite?: boolean) → GPUBuffer` | Create an empty storage buffer |
+| `destroy()` | `() → void` | Destroy all buffers |
 
 ---
 
 ### WGSL Shader Sources
 
-所有 shader 作为字符串常量导出，可直接用于 `device.createShaderModule({ code })`:
+All shaders are exported as string constants, ready for `device.createShaderModule({ code })`:
 
 ```typescript
 import {
-  // ─── 独立 shader 模块 ───
-  cwbvhCommonSrc,       // CWBVH 公共定义 + 节点解包
-  cwbvhTraverseSrc,     // 单层 BVH 遍历（closest + any hit）
-  cwbvhTlasTraverseSrc, // TLAS/BLAS 双层遍历
-  rayTraceSrc,          // 光线生成 + 着色
-  fullscreenSrc,        // 全屏纹理 blit（vertex + fragment）
-  collisionSrc,         // AABB 碰撞检测
+  // ─── Individual shader modules ───
+  cwbvhCommonSrc,       // CWBVH common definitions + node unpacking
+  cwbvhTraverseSrc,     // Single-level BVH traversal (closest + any hit)
+  cwbvhTlasTraverseSrc, // TLAS/BLAS two-level traversal
+  rayTraceSrc,          // Ray generation + shading
+  fullscreenSrc,        // Fullscreen texture blit (vertex + fragment)
+  collisionSrc,         // AABB collision detection
 
-  // ─── 预组合 shader ───
+  // ─── Pre-composed shaders ───
   singleBvhShaderSrc,   // = common + traverse + ray_trace
   tlasBvhShaderSrc,     // = common + traverse + tlas_traverse + ray_trace
   collisionShaderSrc,   // = common + collision
@@ -292,7 +292,7 @@ import {
 
 ### Geometry Utilities
 
-程序化几何生成工具，输出统一的 `Float32Array`（每 9 个 float = 1 个三角形）。
+Procedural geometry generators outputting a unified `Float32Array` (every 9 floats = 1 triangle).
 
 ```typescript
 import {
@@ -306,33 +306,33 @@ import {
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `generateSphere()` | `(center, radius, segments?, rings?) → Float32Array` | UV 球体网格 |
-| `generateIcosphere()` | `(center?, radius?, subdivisions?) → Float32Array` | Icosphere 细分网格 |
-| `generateCornellBox()` | `() → CornellBoxResult` | 标准 Cornell Box 场景 |
-| `generateCornellBoxAt()` | `(center: [x,y,z]) → CornellBoxResult` | 在指定位置生成 Cornell Box |
-| `mergeTriangleArrays()` | `(...arrays: Float32Array[]) → Float32Array` | 合并多个三角形数组 |
+| `generateSphere()` | `(center, radius, segments?, rings?) → Float32Array` | UV sphere mesh |
+| `generateIcosphere()` | `(center?, radius?, subdivisions?) → Float32Array` | Icosphere subdivision mesh |
+| `generateCornellBox()` | `() → CornellBoxResult` | Standard Cornell Box scene |
+| `generateCornellBoxAt()` | `(center: [x,y,z]) → CornellBoxResult` | Generate Cornell Box at a specified position |
+| `mergeTriangleArrays()` | `(...arrays: Float32Array[]) → Float32Array` | Merge multiple triangle arrays |
 
 ---
 
 ## GPU Shader Bindings
 
-### 单层 BVH (Group 0)
+### Single-level BVH (Group 0)
 
 | Binding | Buffer | Type | Description |
 |---------|--------|------|-------------|
-| 0 | `bvh_nodes` | `array<u32>` | CWBVH 节点（80 bytes/node，量化 AABB） |
-| 1 | `primitive_indices` | `array<u32>` | BVH 叶节点 → 三角形索引映射 |
-| 2 | `triangles` | `array<f32>` | 三角形顶点数据（9 floats/tri） |
+| 0 | `bvh_nodes` | `array<u32>` | CWBVH nodes (80 bytes/node, quantized AABBs) |
+| 1 | `primitive_indices` | `array<u32>` | BVH leaf → triangle index mapping |
+| 2 | `triangles` | `array<f32>` | Triangle vertex data (9 floats/tri) |
 
 ### TLAS / BLAS (Group 0)
 
 | Binding | Buffer | Type | Description |
 |---------|--------|------|-------------|
-| 0 | `bvh_nodes` | `array<u32>` | 所有 BLAS + TLAS 节点（拼接） |
-| 1 | `primitive_indices` | `array<u32>` | 所有 BLAS 索引 + TLAS instance_id 映射 |
-| 2 | `triangles` | `array<f32>` | 所有 BLAS 三角形（拼接） |
-| 3 | `blas_offsets` | `array<u32>` | `instance_id → BLAS 节点偏移`（`0xFFFFFFFF` = procedural） |
-| 4+ | *app data* | *user-defined* | 应用层 per-instance 数据（如 `sphere_data`） |
+| 0 | `bvh_nodes` | `array<u32>` | All BLAS + TLAS nodes (concatenated) |
+| 1 | `primitive_indices` | `array<u32>` | All BLAS indices + TLAS instance_id mapping |
+| 2 | `triangles` | `array<f32>` | All BLAS triangles (concatenated) |
+| 3 | `blas_offsets` | `array<u32>` | `instance_id → BLAS node offset` (`0xFFFFFFFF` = procedural) |
+| 4+ | *app data* | *user-defined* | Application-layer per-instance data (e.g., `sphere_data`) |
 
 ### Data Layout
 
@@ -373,13 +373,13 @@ blas_offsets:      [offset_0, offset_1, ..., 0xFFFFFFFF, ...]  (per instance_id)
 ## Development
 
 ```bash
-# 构建 WASM
+# Build WASM
 npm run build:wasm
 
-# 启动 demo dev server
+# Start demo dev server
 npm run dev
 
-# 构建 npm 库
+# Build npm library
 npm run build:lib          # Linux/macOS
 npm run build:lib:win      # Windows
 ```
