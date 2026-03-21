@@ -115,8 +115,17 @@ export class PhysicsDemo {
     this.bvhManager.buildCwBvh(this.allTriangles, BuildQuality.Fast, true);
     this.bvhManager.uploadToGpu(this.bufferManager);
 
-    // Initialize pipelines
-    const computeShader = cwbvhCommonSrc + '\n' + cwbvhTraverseSrc + '\n' + rayTraceSrc;
+    // Initialize pipelines (single-BVH mode, no TLAS)
+    const traceImpl = `
+fn trace_ray(ray: Ray) -> RayHit {
+    return traverse_cwbvh_closest(ray);
+}
+fn trace_shadow_ray(ray: Ray) -> bool {
+    return traverse_cwbvh_any(ray);
+}
+`;
+    const computeShader = (cwbvhCommonSrc + '\n' + cwbvhTraverseSrc + '\n' + rayTraceSrc)
+      .replace('/*TRACE_IMPL*/', traceImpl);
     await this.computePipeline.init(computeShader, 'main');
     await this.renderPipeline.init(fullscreenSrc, this.format);
 

@@ -388,3 +388,207 @@ impl WasmCwBvh {
         drop(self);
     }
 }
+
+// ============================================================================
+// TLAS Scene — Top Level Acceleration Structure for multiple BLAS instances.
+//
+// Data layout aligns with tray_racing (rt_gpu_software_query_tlas.hlsl):
+//   bvh_nodes buffer:  [BLAS_0 nodes | BLAS_1 nodes | ... | BLAS_N nodes | TLAS nodes]
+//   primitive_indices:  [BLAS_0 indices | ... | BLAS_N indices | TLAS indices]
+//   triangles buffer:   [BLAS_0 tris | BLAS_1 tris | ... | BLAS_N tris]
+//   blas_offsets:        per TLAS primitive_index → node offset of that BLAS in bvh_nodes
+//   tlas_start:          node offset where TLAS nodes begin in bvh_nodes
+// ============================================================================
+
+#[wasm_bindgen]
+pub struct WasmTlasScene {
+    /// Concatenated node bytes: [BLAS_0..N nodes | TLAS nodes], as raw u8
+    all_nodes_bytes: Vec<u8>,
+    /// Concatenated primitive indices: [BLAS_0..N indices | TLAS indices]
+    all_indices: Vec<u32>,
+    /// Concatenated triangles from all BLAS instances
+    all_triangles: Vec<Triangle>,
+    /// Per TLAS-primitive → BLAS node offset in all_nodes (in node units, not bytes).
+    /// Indexed by the value in TLAS primitive_indices[i].
+    blas_offsets: Vec<u32>,
+    /// Node index where TLAS begins in all_nodes (= total BLAS node count)
+    tlas_start: u32,
+    build_time_ms: f64,
+    total_node_count: usize,
+    total_triangle_count: usize,
+}
+
+#[wasm_bindgen]
+impl WasmTlasScene {
+    /// Build a TLAS scene from multiple BLAS triangle arrays.
+    ///
+    /// `blas_data_flat`: all BLAS triangles concatenated (f32, every 9 = 1 triangle)
+    /// `blas_tri_counts`: number of triangles per BLAS instance (u32 array)
+    /// `quality`: build quality for both BLAS and TLAS construction
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        blas_data_flat: &[f32],
+        blas_tri_counts: &[u32],
+        quality: BuildQuality,
+    ) -> Result<WasmTlasScene, JsError> {
+        let start = js_sys::Date::now();
+        let config = quality.to_params();
+        let blas_count = blas_tri_counts.len();
+
+        // 1. Parse and build each BLAS
+        let mut blas_list: Vec<CwBvh> = Vec::with_capacity(blas_count);
+        let mut blas_tri_counts_vec: Vec<u32> = Vec::with_capacity(blas_count);
+        let mut all_triangles: Vec<Triangle> = Vec::new();
+        let mut offset: usize = 0;
+
+        for &tri_count in blas_tri_counts.iter() {
+            let float_count = tri_count as usize * 9;
+            if offset + float_count > blas_data_flat.len() {
+                return Err(JsError::new("blas_data_flat too short for given blas_tri_counts"));
+            }
+            let tris = parse_triangles(&blas_data_flat[offset..offset + float_count]);
+            offset += float_count;
+
+            let mut build_time = Duration::default();
+            let cwbvh = build_cwbvh_from_tris(&tris, config, &mut build_time);
+            blas_tri_counts_vec.push(tris.len() as u32);
+            all_triangles.extend_from_slice(&tris);
+            blas_list.push(cwbvh);
+        }
+
+        // 2. Build TLAS from BLAS AABBs (Aabb implements Boundable)
+        let tlas_aabbs: Vec<Aabb> = blas_list.iter().map(|b| b.total_aabb).collect();
+        let mut tlas_build_time = Duration::default();
+        let tlas = obvhs::cwbvh::builder::build_cwbvh(&tlas_aabbs, config, &mut tlas_build_time);
+
+        // 3. Concatenate all data (tray_racing layout)
+
+        // 3a. Nodes: [BLAS_0 nodes | ... | BLAS_N nodes | TLAS nodes]
+        // For each BLAS, we need to patch the node data so that:
+        //   - primitive_base_idx is offset by the cumulative primitive_indices count
+        // child_base_idx does NOT need patching because the GPU traversal uses
+        // `current_bvh_offset + child_node_index` (tray_racing pattern).
+        let mut all_nodes: Vec<obvhs::cwbvh::node::CwBvhNode> = Vec::new();
+        let mut blas_node_offsets: Vec<u32> = Vec::with_capacity(blas_count);
+        let mut global_prim_idx_offset: u32 = 0;
+        let mut global_tri_offset: u32 = 0;
+        let mut all_indices: Vec<u32> = Vec::new();
+
+        for (i, blas) in blas_list.iter().enumerate() {
+            let node_offset_in_units = all_nodes.len() as u32;
+            blas_node_offsets.push(node_offset_in_units);
+
+            // Copy BLAS nodes with patched primitive_base_idx
+            for node in &blas.nodes {
+                let mut patched = *node;
+                patched.primitive_base_idx += global_prim_idx_offset;
+                all_nodes.push(patched);
+            }
+
+            // Copy BLAS primitive_indices with global triangle offset
+            for &idx in &blas.primitive_indices {
+                all_indices.push(idx + global_tri_offset);
+            }
+
+            global_prim_idx_offset += blas.primitive_indices.len() as u32;
+            global_tri_offset += blas_tri_counts_vec[i];
+        }
+
+        let tlas_start = all_nodes.len() as u32;
+
+        // Append TLAS nodes WITHOUT patching primitive_base_idx.
+        // TLAS leaf nodes use primitive_base_idx + local_index to index into blas_offsets[],
+        // NOT into primitive_indices[]. So TLAS nodes keep their original primitive_base_idx.
+        for node in &tlas.nodes {
+            all_nodes.push(*node);
+        }
+
+        // We do NOT append TLAS primitive_indices to all_indices.
+        // TLAS primitive_indices are only used to build blas_offsets (below).
+
+        // Convert all nodes to raw bytes
+        let all_nodes_bytes: Vec<u8> = bytemuck::cast_slice(&all_nodes).to_vec();
+
+        // 3b. Build blas_offsets — aligns with tray_racing (rt_gpu/mod.rs lines 72-78):
+        //   "The tlas bvh has the indices in a specific order.
+        //    Need to have the offsets in this order so the primitive index
+        //    in the tlas can look up directly into this buffer."
+        //
+        // blas_offsets[i] = blas_node_offsets[tlas.primitive_indices[i]]
+        // Size = tlas.primitive_indices.len()
+        // GPU indexes: blas_offsets[primitive_base_idx + local_triangle_index]
+        let blas_offsets: Vec<u32> = tlas.primitive_indices
+            .iter()
+            .map(|&prim_idx| blas_node_offsets[prim_idx as usize])
+            .collect();
+
+        let total_node_count = all_nodes.len();
+        let total_triangle_count = all_triangles.len();
+        let build_time_ms = js_sys::Date::now() - start;
+
+        Ok(WasmTlasScene {
+            all_nodes_bytes,
+            all_indices,
+            all_triangles,
+            blas_offsets,
+            tlas_start,
+            build_time_ms,
+            total_node_count,
+            total_triangle_count,
+        })
+    }
+
+    // ── Data export for GPU upload (zero-copy from WASM linear memory) ──
+
+    pub fn nodes_ptr(&self) -> *const u8 {
+        self.all_nodes_bytes.as_ptr()
+    }
+
+    pub fn nodes_byte_len(&self) -> usize {
+        self.all_nodes_bytes.len()
+    }
+
+    pub fn indices_ptr(&self) -> *const u8 {
+        self.all_indices.as_ptr() as *const u8
+    }
+
+    pub fn indices_byte_len(&self) -> usize {
+        self.all_indices.len() * 4
+    }
+
+    pub fn triangles_ptr(&self) -> *const u8 {
+        self.all_triangles.as_ptr() as *const u8
+    }
+
+    pub fn triangles_byte_len(&self) -> usize {
+        self.all_triangles.len() * std::mem::size_of::<Triangle>()
+    }
+
+    pub fn blas_offsets_ptr(&self) -> *const u8 {
+        self.blas_offsets.as_ptr() as *const u8
+    }
+
+    pub fn blas_offsets_byte_len(&self) -> usize {
+        self.blas_offsets.len() * 4
+    }
+
+    pub fn tlas_start(&self) -> u32 {
+        self.tlas_start
+    }
+
+    pub fn build_time_ms(&self) -> f64 {
+        self.build_time_ms
+    }
+
+    pub fn total_node_count(&self) -> usize {
+        self.total_node_count
+    }
+
+    pub fn total_triangle_count(&self) -> usize {
+        self.total_triangle_count
+    }
+
+    pub fn free(self) {
+        drop(self);
+    }
+}

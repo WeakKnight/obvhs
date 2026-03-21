@@ -1,17 +1,19 @@
 /**
- * Ray Tracing Demo — renders a Cornell Box or icosphere scene using
- * CWBVH traversal on the GPU via WebGPU compute shader.
+ * Ray Tracing Demo — renders 100 Cornell Boxes at random positions using
+ * TLAS/BLAS two-level CWBVH traversal on the GPU via WebGPU compute shader.
+ * Data layout aligns with tray_racing (rt_gpu_software_query_tlas.hlsl).
  */
 import { BufferManager } from '../gpu/buffer-manager';
 import { ComputePipeline } from '../gpu/compute-pipeline';
 import { RenderPipeline } from '../gpu/render-pipeline';
 import { BvhManager, BuildQuality } from '../bvh/bvh-manager';
 import { OrbitCamera } from '../utils/camera';
-import { generateCornellBox, generateIcosphere, mergeTriangleArrays } from '../utils/geometry';
+import { generateCornellBoxAt } from '../utils/geometry';
 
 // Shader sources (loaded via ?raw in Vite)
 import cwbvhCommonSrc from '../shaders/cwbvh_common.wgsl?raw';
 import cwbvhTraverseSrc from '../shaders/cwbvh_traverse.wgsl?raw';
+import cwbvhTlasTraverseSrc from '../shaders/cwbvh_tlas_traverse.wgsl?raw';
 import rayTraceSrc from '../shaders/ray_trace.wgsl?raw';
 import fullscreenSrc from '../shaders/fullscreen.wgsl?raw';
 
@@ -32,6 +34,7 @@ export class RaytraceDemo {
   private frame = 0;
   private animId = 0;
   private resolutionScale = 1.0;
+  private tlasStart = 0;
 
   // Stats callback
   public onStats?: (stats: {
@@ -66,27 +69,51 @@ export class RaytraceDemo {
   }
 
   async init(): Promise<void> {
-    // Generate scene geometry
-    const cornell = generateCornellBox();
-    const sphere = generateIcosphere([0, -0.5, 0], 0.35, 4);
-    const triangles = mergeTriangleArrays(cornell, sphere);
+    // Generate 100 Cornell Boxes at random positions (each is an independent BLAS)
+    const INSTANCE_COUNT = 100;
+    const SPREAD = 30; // spread range for random positions
+    const blasTriArrays: Float32Array[] = [];
 
-    // Build BVH
-    this.bvhManager.buildCwBvh(triangles, BuildQuality.Medium, false);
+    // Use a seeded random for reproducibility
+    let seed = 42;
+    const seededRandom = () => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
 
-    // Upload BVH to GPU
-    this.bvhManager.uploadToGpu(this.bufferManager);
+    for (let i = 0; i < INSTANCE_COUNT; i++) {
+      const x = (seededRandom() - 0.5) * SPREAD;
+      const y = (seededRandom() - 0.5) * SPREAD;
+      const z = (seededRandom() - 0.5) * SPREAD;
+      blasTriArrays.push(generateCornellBoxAt([x, y, z]));
+    }
 
-    // Combine shader sources
-    const computeShader = cwbvhCommonSrc + '\n' + cwbvhTraverseSrc + '\n' + rayTraceSrc;
+    // Build TLAS scene (tray_racing layout)
+    this.bvhManager.buildTlasScene(blasTriArrays, BuildQuality.Medium);
+    this.tlasStart = this.bvhManager.tlasStart;
+
+    // Upload TLAS scene to GPU
+    this.bvhManager.uploadTlasToGpu(this.bufferManager);
+
+    // Combine shader sources (include TLAS traverse after single-BVH traverse)
+    const traceImpl = `
+fn trace_ray(ray: Ray) -> RayHit {
+    return traverse_tlas_closest(ray, camera.tlas_start);
+}
+fn trace_shadow_ray(ray: Ray) -> bool {
+    return traverse_tlas_any(ray, camera.tlas_start);
+}
+`;
+    const computeShader = (cwbvhCommonSrc + '\n' + cwbvhTraverseSrc + '\n' + cwbvhTlasTraverseSrc + '\n' + rayTraceSrc)
+      .replace('/*TRACE_IMPL*/', traceImpl);
 
     // Initialize pipelines
     await this.computePipeline.init(computeShader, 'main');
     await this.renderPipeline.init(fullscreenSrc, this.format);
 
-    // Setup camera
+    // Setup camera — pull back to see the whole scene
     this.camera.target = [0, 0, 0];
-    this.camera.distance = 3.5;
+    this.camera.distance = 25;
     this.camera.phi = Math.PI * 0.4;
 
     // Create output texture and bind groups
@@ -120,18 +147,22 @@ export class RaytraceDemo {
     const nodesBuffer = this.bufferManager.getBuffer('bvh_nodes')!;
     const indicesBuffer = this.bufferManager.getBuffer('primitive_indices')!;
     const trianglesBuffer = this.bufferManager.getBuffer('triangles')!;
+    const blasOffsetsBuffer = this.bufferManager.getBuffer('blas_offsets')!;
 
-    // BVH bind group (group 0)
+    // BVH bind group (group 0) — aligns with tray_racing bindings:
+    // binding(0) = bvh_nodes, binding(1) = primitive_indices,
+    // binding(2) = triangles, binding(3) = blas_offsets (INSTANCES_BINDING)
     const bvhBindGroup = this.computePipeline.createBindGroup([
       { binding: 0, resource: { buffer: nodesBuffer } },
       { binding: 1, resource: { buffer: indicesBuffer } },
       { binding: 2, resource: { buffer: trianglesBuffer } },
+      { binding: 3, resource: { buffer: blasOffsetsBuffer } },
     ], 0);
 
     // Camera + output texture bind group (group 1)
     const cameraBuffer = this.bufferManager.createUniformBuffer(
       'camera_uniforms',
-      this.camera.toUniformData(width, height, this.frame)
+      this.camera.toUniformData(width, height, this.frame, this.tlasStart)
     );
 
     const cameraBindGroup = this.computePipeline.createBindGroup([
@@ -188,7 +219,7 @@ export class RaytraceDemo {
     this.device.queue.writeBuffer(
       cameraBuffer,
       0,
-      new Uint8Array(this.camera.toUniformData(w, h, this.frame))
+      new Uint8Array(this.camera.toUniformData(w, h, this.frame, this.tlasStart))
     );
 
     // Rebuild bind group 1 with updated texture view (needed if texture was recreated)

@@ -36,9 +36,29 @@ export interface WasmCwBvhInstance {
   free(): void;
 }
 
+// Type for the WASM TLAS scene (aligns with tray_racing data layout)
+export interface WasmTlasSceneInstance {
+  nodes_ptr(): number;
+  nodes_byte_len(): number;
+  indices_ptr(): number;
+  indices_byte_len(): number;
+  triangles_ptr(): number;
+  triangles_byte_len(): number;
+  blas_offsets_ptr(): number;
+  blas_offsets_byte_len(): number;
+  tlas_start(): number;
+  build_time_ms(): number;
+  total_node_count(): number;
+  total_triangle_count(): number;
+  free(): void;
+}
+
 export interface WasmModule {
   WasmCwBvh: {
     new(triangles: Float32Array, quality: number, keepBvh2: boolean): WasmCwBvhInstance;
+  };
+  WasmTlasScene: {
+    new(blasDataFlat: Float32Array, blasTriCounts: Uint32Array, quality: number): WasmTlasSceneInstance;
   };
   wasm_memory(): WebAssembly.Memory;
   BuildQuality: {
@@ -61,11 +81,13 @@ export enum BuildQuality {
 export class BvhManager {
   private wasmModule: WasmModule | null = null;
   private bvh: WasmCwBvhInstance | null = null;
+  private tlasScene: WasmTlasSceneInstance | null = null;
 
   /** Statistics from the last build */
   public lastBuildTimeMs: number = 0;
   public nodeCount: number = 0;
   public triangleCount: number = 0;
+  public tlasStart: number = 0;
 
   /**
    * Load and initialize the WASM module.
@@ -175,11 +197,99 @@ export class BvhManager {
     return this.bvh;
   }
 
+  // ── TLAS Scene (tray_racing layout) ──
+
+  /**
+   * Build a TLAS scene from multiple BLAS triangle arrays.
+   * Each element in `blasTriArrays` is a Float32Array for one BLAS instance.
+   * Data layout follows tray_racing: all BLAS nodes concatenated, then TLAS nodes appended.
+   */
+  buildTlasScene(
+    blasTriArrays: Float32Array[],
+    quality: BuildQuality = BuildQuality.Medium
+  ): void {
+    if (!this.wasmModule) throw new Error('WASM module not loaded');
+
+    // Free previous TLAS scene
+    this.tlasScene?.free();
+    this.tlasScene = null;
+
+    // Flatten all BLAS data into one big array + count array
+    const triCounts = new Uint32Array(blasTriArrays.length);
+    let totalFloats = 0;
+    for (let i = 0; i < blasTriArrays.length; i++) {
+      triCounts[i] = blasTriArrays[i].length / 9;
+      totalFloats += blasTriArrays[i].length;
+    }
+
+    const flatData = new Float32Array(totalFloats);
+    let offset = 0;
+    for (const arr of blasTriArrays) {
+      flatData.set(arr, offset);
+      offset += arr.length;
+    }
+
+    this.tlasScene = new this.wasmModule.WasmTlasScene(flatData, triCounts, quality);
+    this.lastBuildTimeMs = this.tlasScene.build_time_ms();
+    this.nodeCount = this.tlasScene.total_node_count();
+    this.triangleCount = this.tlasScene.total_triangle_count();
+    this.tlasStart = this.tlasScene.tlas_start();
+  }
+
+  /**
+   * Upload TLAS scene data to GPU buffers (tray_racing layout).
+   * Returns the 4 buffers needed for the BVH bind group.
+   */
+  uploadTlasToGpu(bufferManager: BufferManager): {
+    nodes: GPUBuffer;
+    indices: GPUBuffer;
+    triangles: GPUBuffer;
+    blasOffsets: GPUBuffer;
+  } {
+    if (!this.tlasScene || !this.wasmModule) {
+      throw new Error('No TLAS scene built yet');
+    }
+
+    const memory = this.wasmModule.wasm_memory();
+
+    const nodes = bufferManager.uploadFromWasm(
+      'bvh_nodes',
+      memory,
+      this.tlasScene.nodes_ptr(),
+      this.tlasScene.nodes_byte_len()
+    );
+
+    const indices = bufferManager.uploadFromWasm(
+      'primitive_indices',
+      memory,
+      this.tlasScene.indices_ptr(),
+      this.tlasScene.indices_byte_len()
+    );
+
+    const triangles = bufferManager.uploadFromWasm(
+      'triangles',
+      memory,
+      this.tlasScene.triangles_ptr(),
+      this.tlasScene.triangles_byte_len()
+    );
+
+    const blasOffsets = bufferManager.uploadFromWasm(
+      'blas_offsets',
+      memory,
+      this.tlasScene.blas_offsets_ptr(),
+      this.tlasScene.blas_offsets_byte_len()
+    );
+
+    return { nodes, indices, triangles, blasOffsets };
+  }
+
   /**
    * Cleanup.
    */
   destroy(): void {
     this.bvh?.free();
     this.bvh = null;
+    this.tlasScene?.free();
+    this.tlasScene = null;
   }
 }

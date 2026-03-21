@@ -14,7 +14,7 @@ struct CameraUniforms {
     width: u32,
     height: u32,
     frame: u32,
-    _pad2: u32,
+    tlas_start: u32, // Node index where TLAS begins (aligns with tray_racing ViewUniform.tlas_start)
 };
 
 @group(1) @binding(0) var<uniform> camera: CameraUniforms;
@@ -95,28 +95,11 @@ fn shade(ray: Ray, hit: RayHit) -> vec3<f32> {
     return base_color * (ambient + diffuse);
 }
 
-// ─── Configuration ───
-const USE_SHORT_STACK: bool = true; // Set to true to use short stack traversal
-
 // ─── Ray Tracing Entry Points ───
-
-/// Main ray tracing function that selects between full stack and short stack traversal
-fn trace_ray(ray: Ray) -> RayHit {
-    if USE_SHORT_STACK {
-        return traverse_cwbvh_closest_short_stack(ray);
-    } else {
-        return traverse_cwbvh_closest(ray);
-    }
-}
-
-/// Shadow ray tracing function that selects between full stack and short stack traversal
-fn trace_shadow_ray(ray: Ray) -> bool {
-    if USE_SHORT_STACK {
-        return traverse_cwbvh_any_short_stack(ray);
-    } else {
-        return traverse_cwbvh_any(ray);
-    }
-}
+// These functions are injected by the host code at shader concatenation time.
+// Single-BVH mode: calls traverse_cwbvh_closest / traverse_cwbvh_any
+// TLAS mode: calls traverse_tlas_closest / traverse_tlas_any
+/*TRACE_IMPL*/
 
 // ─── Compute Entry Point ───
 @compute @workgroup_size(8, 8)

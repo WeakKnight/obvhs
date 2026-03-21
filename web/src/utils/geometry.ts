@@ -126,14 +126,28 @@ export function generateIcosphere(
 
 /** Generate a Cornell Box scene (open-front box + 2 boxes inside). */
 export function generateCornellBox(): Float32Array {
+  return generateCornellBoxAt([0, 0, 0]);
+}
+
+/**
+ * Generate a Cornell Box at a given center position.
+ * Each Cornell Box is a 2×2×2 unit box (from center-1 to center+1 on each axis).
+ * Includes an icosphere inside the box.
+ */
+export function generateCornellBoxAt(center: [number, number, number]): Float32Array {
   const tris: number[] = [];
+  const [cx, cy, cz] = center;
 
   const quad = (
     a: [number, number, number], b: [number, number, number],
     c: [number, number, number], d: [number, number, number]
   ) => {
-    tris.push(...a, ...b, ...c);
-    tris.push(...a, ...c, ...d);
+    tris.push(a[0] + cx, a[1] + cy, a[2] + cz);
+    tris.push(b[0] + cx, b[1] + cy, b[2] + cz);
+    tris.push(c[0] + cx, c[1] + cy, c[2] + cz);
+    tris.push(a[0] + cx, a[1] + cy, a[2] + cz);
+    tris.push(c[0] + cx, c[1] + cy, c[2] + cz);
+    tris.push(d[0] + cx, d[1] + cy, d[2] + cz);
   };
 
   // Room: left=-1, right=1, bottom=-1, top=1, back=-1, front=1
@@ -166,7 +180,17 @@ export function generateCornellBox(): Float32Array {
   quad([sx + ss, -1, sz - ss], [sx + ss, -1, sz + ss], [sx + ss, -1 + sh, sz + ss], [sx + ss, -1 + sh, sz - ss]);
   quad([sx - ss, -1 + sh, sz - ss], [sx + ss, -1 + sh, sz - ss], [sx + ss, -1 + sh, sz + ss], [sx - ss, -1 + sh, sz + ss]);
 
-  return new Float32Array(tris);
+  // Icosphere — sitting on the short box
+  const sphereCenter: [number, number, number] = [cx + sx, cy - 1 + sh + 0.25, cz + sz];
+  const sphereRadius = 0.25;
+  const sphereTris = generateIcosphere(sphereCenter, sphereRadius, 2);
+
+  // Combine room + boxes + sphere
+  const roomData = new Float32Array(tris);
+  const result = new Float32Array(roomData.length + sphereTris.length);
+  result.set(roomData);
+  result.set(sphereTris, roomData.length);
+  return result;
 }
 
 /** Combine multiple triangle arrays into one. */

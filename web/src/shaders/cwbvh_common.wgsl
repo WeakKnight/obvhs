@@ -34,13 +34,16 @@ struct Aabb {
 
 // ─── Bindings ───
 // BVH nodes as flat u32 array: each node = 20 consecutive u32s (80 bytes)
+// Contains all BLAS nodes followed by TLAS nodes (tray_racing layout)
 @group(0) @binding(0) var<storage, read> bvh_nodes: array<u32>;
-// Primitive index remapping
+// Primitive index remapping (BLAS indices followed by TLAS indices)
 @group(0) @binding(1) var<storage, read> primitive_indices: array<u32>;
 // Triangles as flat f32 array: each triangle = 12 floats (3 vertices × vec3 + padding)
 // Layout: [v0.x, v0.y, v0.z, pad, v1.x, v1.y, v1.z, pad, v2.x, v2.y, v2.z, pad]
 // This matches Vec3A (16-byte aligned) layout from Rust
 @group(0) @binding(2) var<storage, read> triangles: array<f32>;
+// NOTE: blas_offsets binding(3) is declared in cwbvh_tlas_traverse.wgsl
+// Only included when TLAS traversal is enabled.
 
 // ─── Ray Creation ───
 

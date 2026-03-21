@@ -59,8 +59,10 @@ export class OrbitCamera {
     ];
   }
 
-  /** Write camera data to a Float32Array for uniform upload (64 bytes). */
-  toUniformData(width: number, height: number, frame: number): ArrayBuffer {
+  /** Write camera data to a Float32Array for uniform upload (64 bytes).
+   * @param tlasStart — node index where TLAS begins in the concatenated bvh_nodes buffer
+   */
+  toUniformData(width: number, height: number, frame: number, tlasStart: number = 0): ArrayBuffer {
     const buf = new ArrayBuffer(64);
     const f32 = new Float32Array(buf);
     const u32 = new Uint32Array(buf);
@@ -73,7 +75,7 @@ export class OrbitCamera {
     f32[8] = 0; f32[9] = 1; f32[10] = 0; // up
     f32[11] = this.fov; // fov
     u32[12] = width; u32[13] = height; u32[14] = frame;
-    u32[15] = 0; // pad
+    u32[15] = tlasStart; // tlas_start — aligns with tray_racing ViewUniform.tlas_start
 
     return buf;
   }
