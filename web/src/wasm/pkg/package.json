@@ -1,0 +1,17 @@
+{
+  "name": "obvhs-wasm",
+  "type": "module",
+  "description": "WebAssembly bindings for obvhs BVH library",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "files": [
+    "obvhs_wasm_bg.wasm",
+    "obvhs_wasm.js",
+    "obvhs_wasm.d.ts"
+  ],
+  "main": "obvhs_wasm.js",
+  "types": "obvhs_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

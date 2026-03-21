@@ -7,7 +7,6 @@ Cargo.lock
 # Web frontend
 web/node_modules/
 web/dist/
-web/src/wasm/pkg/
 
 # CodeBuddy
 .codebuddy/
