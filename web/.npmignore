@@ -1,0 +1,13 @@
+# Everything except dist/ and package.json/readme.md is excluded
+# via the "files" whitelist in package.json (["dist"]).
+# This .npmignore exists to override the parent .gitignore
+# which would otherwise interfere with npm pack in a git sub-directory.
+
+src/
+node_modules/
+scripts/
+tsconfig.json
+tsconfig.lib.json
+vite.config.ts
+index.html
+*.tgz
