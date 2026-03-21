@@ -12,20 +12,22 @@
       "types": "./dist/index.d.ts"
     },
     "./wasm": {
-      "import": "./dist/wasm/obvhs_wasm.js",
-      "types": "./dist/wasm/obvhs_wasm.d.ts"
+      "import": "./src/wasm/pkg/obvhs_wasm.js",
+      "types": "./src/wasm/pkg/obvhs_wasm.d.ts"
     },
-    "./wasm/*": "./dist/wasm/*"
+    "./wasm/*": "./src/wasm/pkg/*"
   },
   "files": [
-    "dist"
+    "dist",
+    "src/wasm/pkg",
+    "readme.md"
   ],
   "sideEffects": false,
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:lib": "BUILD_MODE=lib vite build && tsc -p tsconfig.lib.json && node scripts/copy-wasm.js",
-    "build:lib:win": "set BUILD_MODE=lib&& vite build && tsc -p tsconfig.lib.json && node scripts/copy-wasm.js",
+    "build:lib": "BUILD_MODE=lib vite build && tsc -p tsconfig.lib.json",
+    "build:lib:win": "set BUILD_MODE=lib&& vite build && tsc -p tsconfig.lib.json",
     "preview": "vite preview",
     "build:wasm": "cd ../crates/obvhs-wasm && wasm-pack build --target web --out-dir ../../web/src/wasm/pkg",
     "prepack": "node -e \"const fs=require('fs'); if(!fs.existsSync('dist/obvhs.js')){console.error('ERROR: dist/ not found. Run npm run build:lib:win first.');process.exit(1)}; if(!fs.existsSync('src/wasm/pkg/obvhs_wasm_bg.wasm')){console.error('ERROR: WASM not found. Run npm run build:wasm first.');process.exit(1)}\""
