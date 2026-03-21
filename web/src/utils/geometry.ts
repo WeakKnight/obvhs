@@ -124,17 +124,28 @@ export function generateIcosphere(
   return result;
 }
 
+/** Result of generating a Cornell Box: triangle mesh + procedural sphere info. */
+export interface CornellBoxResult {
+  /** Triangle mesh data (walls + boxes) as flat Float32Array (9 floats per tri) */
+  triangles: Float32Array;
+  /** Procedural sphere: center [x, y, z] in world space */
+  sphereCenter: [number, number, number];
+  /** Procedural sphere: base radius (before per-instance random scaling) */
+  sphereBaseRadius: number;
+}
+
 /** Generate a Cornell Box scene (open-front box + 2 boxes inside). */
-export function generateCornellBox(): Float32Array {
+export function generateCornellBox(): CornellBoxResult {
   return generateCornellBoxAt([0, 0, 0]);
 }
 
 /**
  * Generate a Cornell Box at a given center position.
  * Each Cornell Box is a 2×2×2 unit box (from center-1 to center+1 on each axis).
- * Includes an icosphere inside the box.
+ * Returns triangle mesh (walls + boxes) and procedural sphere info separately.
+ * The sphere is NOT tessellated — it will be rendered via procedural SDF intersection.
  */
-export function generateCornellBoxAt(center: [number, number, number]): Float32Array {
+export function generateCornellBoxAt(center: [number, number, number]): CornellBoxResult {
   const tris: number[] = [];
   const [cx, cy, cz] = center;
 
@@ -180,17 +191,16 @@ export function generateCornellBoxAt(center: [number, number, number]): Float32A
   quad([sx + ss, -1, sz - ss], [sx + ss, -1, sz + ss], [sx + ss, -1 + sh, sz + ss], [sx + ss, -1 + sh, sz - ss]);
   quad([sx - ss, -1 + sh, sz - ss], [sx + ss, -1 + sh, sz - ss], [sx + ss, -1 + sh, sz + ss], [sx - ss, -1 + sh, sz + ss]);
 
-  // Icosphere — sitting on the short box
+  // Procedural sphere info — sitting on the short box (same position as before)
+  // The sphere center is in world space (includes the Cornell Box offset).
   const sphereCenter: [number, number, number] = [cx + sx, cy - 1 + sh + 0.25, cz + sz];
-  const sphereRadius = 0.25;
-  const sphereTris = generateIcosphere(sphereCenter, sphereRadius, 2);
+  const sphereBaseRadius = 0.25;
 
-  // Combine room + boxes + sphere
-  const roomData = new Float32Array(tris);
-  const result = new Float32Array(roomData.length + sphereTris.length);
-  result.set(roomData);
-  result.set(sphereTris, roomData.length);
-  return result;
+  return {
+    triangles: new Float32Array(tris),
+    sphereCenter,
+    sphereBaseRadius,
+  };
 }
 
 /** Combine multiple triangle arrays into one. */

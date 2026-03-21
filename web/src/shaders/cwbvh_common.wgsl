@@ -25,6 +25,8 @@ struct Ray {
 struct RayHit {
     primitive_id: u32,
     t: f32,
+    instance_id: u32,    // TLAS instance index — used to index per-instance app data
+    is_procedural: u32,  // 0 = triangle mesh hit, 1 = procedural hit
 };
 
 struct Aabb {

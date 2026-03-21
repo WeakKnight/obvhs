@@ -394,10 +394,14 @@ impl WasmCwBvh {
 //
 // Data layout aligns with tray_racing (rt_gpu_software_query_tlas.hlsl):
 //   bvh_nodes buffer:  [BLAS_0 nodes | BLAS_1 nodes | ... | BLAS_N nodes | TLAS nodes]
-//   primitive_indices:  [BLAS_0 indices | ... | BLAS_N indices | TLAS indices]
+//   primitive_indices:  [BLAS_0 indices | ... | BLAS_N indices | TLAS indices (instance_ids)]
 //   triangles buffer:   [BLAS_0 tris | BLAS_1 tris | ... | BLAS_N tris]
-//   blas_offsets:        per TLAS primitive_index → node offset of that BLAS in bvh_nodes
+//   blas_offsets:        per instance_id → node offset (INVALID = procedural)
 //   tlas_start:          node offset where TLAS nodes begin in bvh_nodes
+//
+// Key optimization: blas_instance_ids and blas_types are eliminated.
+//   - instance_id is read from primitive_indices[] at TLAS leaf level
+//   - procedural detection uses blas_offsets[instance_id] == INVALID sentinel
 // ============================================================================
 
 #[wasm_bindgen]
@@ -410,6 +414,11 @@ pub struct WasmTlasScene {
     all_triangles: Vec<Triangle>,
     /// Per TLAS-primitive → BLAS node offset in all_nodes (in node units, not bytes).
     /// Indexed by the value in TLAS primitive_indices[i].
+    /// For procedural BLAS instances, this is set to INVALID (0xFFFFFFFF) as a sentinel:
+    /// the shader checks `blas_offsets[i] == 0xFFFFFFFF` to detect procedural geometry
+    /// and skip BLAS traversal (analogous to DXR intersection shaders).
+    /// The instance_id is implicitly `primitive_indices[i]` from the TLAS layer
+    /// (entries are sorted by instance_index, so primitive_indices maps directly).
     blas_offsets: Vec<u32>,
     /// Node index where TLAS begins in all_nodes (= total BLAS node count)
     tlas_start: u32,
@@ -420,28 +429,85 @@ pub struct WasmTlasScene {
 
 #[wasm_bindgen]
 impl WasmTlasScene {
-    /// Build a TLAS scene from multiple BLAS triangle arrays.
+    /// Build a TLAS scene from mixed BLAS types: triangle meshes + procedural AABBs.
     ///
-    /// `blas_data_flat`: all BLAS triangles concatenated (f32, every 9 = 1 triangle)
-    /// `blas_tri_counts`: number of triangles per BLAS instance (u32 array)
+    /// **Triangle mesh BLAS:**
+    /// - `blas_data_flat`: all BLAS triangles concatenated (f32, every 9 = 1 triangle)
+    /// - `blas_tri_counts`: number of triangles per triangle-mesh BLAS instance (u32 array)
+    ///
+    /// **Procedural BLAS (AABB-only, like DXR PROCEDURAL_PRIMITIVE_AABBS):**
+    /// - `procedural_aabbs_flat`: flat f32 array, every 6 floats = 1 AABB (min_xyz, max_xyz)
+    /// - `procedural_instance_indices`: for each procedural BLAS, its position in the final
+    ///   TLAS instance list. E.g., if we have 100 triangle-mesh + 100 procedural instances
+    ///   interleaved, this array tells us where each procedural one sits.
+    ///
+    /// The total TLAS instance count = blas_tri_counts.len() + procedural count.
+    /// Procedural detection uses blas_offsets sentinel (INVALID_U32).
+    /// instance_id is stored in primitive_indices at TLAS level.
+    ///
     /// `quality`: build quality for both BLAS and TLAS construction
     #[wasm_bindgen(constructor)]
     pub fn new(
         blas_data_flat: &[f32],
         blas_tri_counts: &[u32],
+        procedural_aabbs_flat: &[f32],
+        procedural_instance_indices: &[u32],
         quality: BuildQuality,
     ) -> Result<WasmTlasScene, JsError> {
         let start = js_sys::Date::now();
         let config = quality.to_params();
-        let blas_count = blas_tri_counts.len();
+        let tri_blas_count = blas_tri_counts.len();
+        let proc_blas_count = procedural_aabbs_flat.len() / 6;
 
-        // 1. Parse and build each BLAS
-        let mut blas_list: Vec<CwBvh> = Vec::with_capacity(blas_count);
-        let mut blas_tri_counts_vec: Vec<u32> = Vec::with_capacity(blas_count);
+        if procedural_aabbs_flat.len() % 6 != 0 {
+            return Err(JsError::new("procedural_aabbs_flat length must be divisible by 6"));
+        }
+        if procedural_instance_indices.len() != proc_blas_count {
+            return Err(JsError::new("procedural_instance_indices length must match procedural AABB count"));
+        }
+
+        let total_blas_count = tri_blas_count + proc_blas_count;
+
+        // Track per-BLAS metadata: (cwbvh, is_procedural, original_instance_index)
+        // We'll sort them by instance_index later to build the TLAS in the right order.
+
+        // --- 1a. Build triangle-mesh BLAS instances ---
+        struct BlasEntry {
+            cwbvh: CwBvh,
+            is_procedural: bool,
+            instance_index: u32,  // position in final TLAS instance list
+            tri_count: u32,       // 0 for procedural
+        }
+
+        // Determine triangle mesh instance indices: they fill the slots NOT taken by procedural
+        let mut proc_set = std::collections::HashSet::new();
+        for &idx in procedural_instance_indices.iter() {
+            proc_set.insert(idx);
+        }
+
+        let mut tri_instance_indices: Vec<u32> = Vec::with_capacity(tri_blas_count);
+        {
+            let mut ti = 0u32;
+            for i in 0..total_blas_count as u32 {
+                if !proc_set.contains(&i) {
+                    tri_instance_indices.push(i);
+                    ti += 1;
+                    if ti as usize >= tri_blas_count {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if tri_instance_indices.len() != tri_blas_count {
+            return Err(JsError::new("Instance index assignment mismatch: not enough slots for triangle BLAS"));
+        }
+
+        let mut entries: Vec<BlasEntry> = Vec::with_capacity(total_blas_count);
         let mut all_triangles: Vec<Triangle> = Vec::new();
         let mut offset: usize = 0;
 
-        for &tri_count in blas_tri_counts.iter() {
+        for (i, &tri_count) in blas_tri_counts.iter().enumerate() {
             let float_count = tri_count as usize * 9;
             if offset + float_count > blas_data_flat.len() {
                 return Err(JsError::new("blas_data_flat too short for given blas_tri_counts"));
@@ -451,76 +517,123 @@ impl WasmTlasScene {
 
             let mut build_time = Duration::default();
             let cwbvh = build_cwbvh_from_tris(&tris, config, &mut build_time);
-            blas_tri_counts_vec.push(tris.len() as u32);
+            let tc = tris.len() as u32;
             all_triangles.extend_from_slice(&tris);
-            blas_list.push(cwbvh);
+            entries.push(BlasEntry {
+                cwbvh,
+                is_procedural: false,
+                instance_index: tri_instance_indices[i],
+                tri_count: tc,
+            });
         }
 
-        // 2. Build TLAS from BLAS AABBs (Aabb implements Boundable)
-        let tlas_aabbs: Vec<Aabb> = blas_list.iter().map(|b| b.total_aabb).collect();
+        // --- 1b. Build procedural BLAS instances (AABB-only, single-leaf CWBVH) ---
+        for (i, idx) in procedural_instance_indices.iter().enumerate() {
+            let b = i * 6;
+            let aabb = Aabb {
+                min: Vec3A::new(procedural_aabbs_flat[b], procedural_aabbs_flat[b + 1], procedural_aabbs_flat[b + 2]),
+                max: Vec3A::new(procedural_aabbs_flat[b + 3], procedural_aabbs_flat[b + 4], procedural_aabbs_flat[b + 5]),
+            };
+
+            // Build a CWBVH from a single AABB primitive.
+            // This creates a minimal BVH with one leaf node pointing to one primitive.
+            let mut build_time = Duration::default();
+            let cwbvh = obvhs::cwbvh::builder::build_cwbvh(&[aabb], config, &mut build_time);
+
+            entries.push(BlasEntry {
+                cwbvh,
+                is_procedural: true,
+                instance_index: *idx,
+                tri_count: 0,
+            });
+        }
+
+        // --- 2. Sort entries by instance_index for deterministic TLAS ordering ---
+        entries.sort_by_key(|e| e.instance_index);
+
+        // --- 3. Build TLAS from all BLAS AABBs ---
+        let tlas_aabbs: Vec<Aabb> = entries.iter().map(|e| e.cwbvh.total_aabb).collect();
         let mut tlas_build_time = Duration::default();
         let tlas = obvhs::cwbvh::builder::build_cwbvh(&tlas_aabbs, config, &mut tlas_build_time);
 
-        // 3. Concatenate all data (tray_racing layout)
+        // --- 4. Concatenate all data (tray_racing layout) ---
 
-        // 3a. Nodes: [BLAS_0 nodes | ... | BLAS_N nodes | TLAS nodes]
-        // For each BLAS, we need to patch the node data so that:
-        //   - primitive_base_idx is offset by the cumulative primitive_indices count
-        // child_base_idx does NOT need patching because the GPU traversal uses
-        // `current_bvh_offset + child_node_index` (tray_racing pattern).
+        // 4a. Nodes: [BLAS_0 nodes | ... | BLAS_N nodes | TLAS nodes]
         let mut all_nodes: Vec<obvhs::cwbvh::node::CwBvhNode> = Vec::new();
-        let mut blas_node_offsets: Vec<u32> = Vec::with_capacity(blas_count);
+        let mut blas_node_offsets: Vec<u32> = Vec::with_capacity(total_blas_count);
+        let mut blas_is_procedural: Vec<bool> = Vec::with_capacity(total_blas_count);
         let mut global_prim_idx_offset: u32 = 0;
         let mut global_tri_offset: u32 = 0;
         let mut all_indices: Vec<u32> = Vec::new();
 
-        for (i, blas) in blas_list.iter().enumerate() {
+        for entry in &entries {
             let node_offset_in_units = all_nodes.len() as u32;
             blas_node_offsets.push(node_offset_in_units);
+            blas_is_procedural.push(entry.is_procedural);
 
             // Copy BLAS nodes with patched primitive_base_idx
-            for node in &blas.nodes {
+            for node in &entry.cwbvh.nodes {
                 let mut patched = *node;
                 patched.primitive_base_idx += global_prim_idx_offset;
                 all_nodes.push(patched);
             }
 
             // Copy BLAS primitive_indices with global triangle offset
-            for &idx in &blas.primitive_indices {
-                all_indices.push(idx + global_tri_offset);
+            // For procedural BLAS, primitive_indices still exist (the AABB primitive),
+            // but we won't use them for triangle lookup — the shader detects procedural
+            // via blas_offsets == INVALID_U32 sentinel.
+            for &idx in &entry.cwbvh.primitive_indices {
+                if entry.is_procedural {
+                    // Procedural: push a sentinel value (won't be used for triangle lookup)
+                    all_indices.push(0xFFFFFFFF);
+                } else {
+                    all_indices.push(idx + global_tri_offset);
+                }
             }
 
-            global_prim_idx_offset += blas.primitive_indices.len() as u32;
-            global_tri_offset += blas_tri_counts_vec[i];
+            global_prim_idx_offset += entry.cwbvh.primitive_indices.len() as u32;
+            if !entry.is_procedural {
+                global_tri_offset += entry.tri_count;
+            }
         }
 
         let tlas_start = all_nodes.len() as u32;
 
-        // Append TLAS nodes WITHOUT patching primitive_base_idx.
-        // TLAS leaf nodes use primitive_base_idx + local_index to index into blas_offsets[],
-        // NOT into primitive_indices[]. So TLAS nodes keep their original primitive_base_idx.
+        // The TLAS primitive_indices will be appended to all_indices so that the
+        // shader can read instance_id via `primitive_indices[global_triangle_index]`.
+        // We need to patch TLAS nodes' primitive_base_idx to point into this region.
+        let tlas_prim_idx_offset = all_indices.len() as u32;
+
+        // Append TLAS nodes with patched primitive_base_idx.
         for node in &tlas.nodes {
-            all_nodes.push(*node);
+            let mut patched = *node;
+            patched.primitive_base_idx += tlas_prim_idx_offset;
+            all_nodes.push(patched);
         }
 
-        // We do NOT append TLAS primitive_indices to all_indices.
-        // TLAS primitive_indices are only used to build blas_offsets (below).
+        // Append TLAS primitive_indices to all_indices.
+        // Each entry stores the instance_index (= sorted position = BLAS entry index),
+        // so the shader can read instance_id = primitive_indices[global_triangle_index].
+        // Since entries are sorted by instance_index (0..N), we have:
+        //   tlas.primitive_indices[i] → entries[prim_idx].instance_index = prim_idx
+        // So we just store the instance_index directly.
+        for &prim_idx in &tlas.primitive_indices {
+            all_indices.push(entries[prim_idx as usize].instance_index);
+        }
 
-        // Convert all nodes to raw bytes
         let all_nodes_bytes: Vec<u8> = bytemuck::cast_slice(&all_nodes).to_vec();
 
-        // 3b. Build blas_offsets — aligns with tray_racing (rt_gpu/mod.rs lines 72-78):
-        //   "The tlas bvh has the indices in a specific order.
-        //    Need to have the offsets in this order so the primitive index
-        //    in the tlas can look up directly into this buffer."
-        //
-        // blas_offsets[i] = blas_node_offsets[tlas.primitive_indices[i]]
-        // Size = tlas.primitive_indices.len()
-        // GPU indexes: blas_offsets[primitive_base_idx + local_triangle_index]
-        let blas_offsets: Vec<u32> = tlas.primitive_indices
-            .iter()
-            .map(|&prim_idx| blas_node_offsets[prim_idx as usize])
-            .collect();
+        // 4b. Build blas_offsets indexed by instance_id (0..total_blas_count).
+        // For procedural BLAS, set to INVALID (0xFFFFFFFF) as sentinel.
+        // The shader reads instance_id from primitive_indices, then indexes blas_offsets[instance_id].
+        // Since entries are sorted by instance_index, blas_offsets[i] corresponds to entry i.
+        let blas_offsets: Vec<u32> = entries.iter().enumerate().map(|(i, _)| {
+            if blas_is_procedural[i] {
+                0xFFFFFFFFu32  // sentinel: procedural geometry
+            } else {
+                blas_node_offsets[i]
+            }
+        }).collect();
 
         let total_node_count = all_nodes.len();
         let total_triangle_count = all_triangles.len();

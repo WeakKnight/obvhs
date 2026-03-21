@@ -128,6 +128,8 @@ fn traverse_cwbvh_closest(ray_in: Ray) -> RayHit {
     var hit: RayHit;
     hit.primitive_id = INVALID_U32;
     hit.t = ray.tmax;
+    hit.instance_id = INVALID_U32;
+    hit.is_procedural = 0u;
 
     let oct_inv4 = ray_get_octant_inv4(ray.direction);
 
@@ -308,6 +310,8 @@ fn traverse_cwbvh_closest_short_stack(ray_in: Ray) -> RayHit {
     var hit: RayHit;
     hit.primitive_id = INVALID_U32;
     hit.t = ray.tmax;
+    hit.instance_id = INVALID_U32;
+    hit.is_procedural = 0u;
 
     let oct_inv4 = ray_get_octant_inv4(ray.direction);
 

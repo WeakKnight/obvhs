@@ -29,7 +29,7 @@ export class BufferManager {
       this.buffers.set(name, buf);
     }
 
-    this.device.queue.writeBuffer(buf, 0, data);
+    this.device.queue.writeBuffer(buf, 0, data as unknown as ArrayBuffer);
     return buf;
   }
 

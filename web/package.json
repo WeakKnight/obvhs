@@ -1,13 +1,54 @@
 {
-  "name": "obvhs-web",
+  "name": "obvhs",
   "version": "0.1.0",
-  "private": true,
+  "description": "Compressed Wide BVH (CWBVH) for WebGPU — high-performance BVH construction via WASM and GPU traversal shaders",
   "type": "module",
+  "main": "./dist/obvhs.js",
+  "module": "./dist/obvhs.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/obvhs.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./wasm": {
+      "import": "./src/wasm/pkg/obvhs_wasm.js",
+      "types": "./src/wasm/pkg/obvhs_wasm.d.ts"
+    },
+    "./wasm/*": "./src/wasm/pkg/*"
+  },
+  "files": [
+    "dist",
+    "src/wasm/pkg/obvhs_wasm.js",
+    "src/wasm/pkg/obvhs_wasm.d.ts",
+    "src/wasm/pkg/obvhs_wasm_bg.wasm"
+  ],
+  "sideEffects": false,
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:lib": "BUILD_MODE=lib vite build && tsc -p tsconfig.lib.json",
+    "build:lib:win": "set BUILD_MODE=lib&& vite build && tsc -p tsconfig.lib.json",
     "preview": "vite preview",
-    "build:wasm": "cd ../crates/obvhs-wasm && wasm-pack build --target web --out-dir ../../web/src/wasm/pkg"
+    "build:wasm": "cd ../crates/obvhs-wasm && wasm-pack build --target web --out-dir ../../web/src/wasm/pkg",
+    "prepublishOnly": "npm run build:wasm && npm run build:lib:win"
+  },
+  "keywords": [
+    "bvh",
+    "cwbvh",
+    "webgpu",
+    "wasm",
+    "ray-tracing",
+    "acceleration-structure",
+    "collision-detection",
+    "tlas",
+    "blas"
+  ],
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DGriffin91/obvhs",
+    "directory": "web"
   },
   "dependencies": {},
   "devDependencies": {
@@ -15,5 +56,13 @@
     "vite": "^6.0.0",
     "vite-plugin-wasm": "^3.4.0",
     "@webgpu/types": "^0.1.52"
+  },
+  "peerDependencies": {
+    "@webgpu/types": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@webgpu/types": {
+      "optional": true
+    }
   }
 }

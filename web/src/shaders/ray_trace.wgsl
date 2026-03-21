@@ -73,8 +73,33 @@ fn shade(ray: Ray, hit: RayHit) -> vec3<f32> {
         return mix(vec3<f32>(0.02, 0.02, 0.06), vec3<f32>(0.05, 0.1, 0.2), t);
     }
 
-    let n = compute_normal(hit.primitive_id);
     let hit_pos = ray.origin + ray.direction * hit.t;
+    var n: vec3<f32>;
+    var base_color: vec3<f32>;
+
+    if hit.is_procedural == 1u {
+        // ═══ Procedural sphere shading ═══
+        // Read sphere center+radius from app-layer per-instance data via instance_id.
+        // This validates that instance_id is correctly propagated through TLAS traversal.
+        let sphere = load_sphere_center_radius(hit.instance_id);
+        let center = sphere.xyz;
+        let radius = sphere.w;
+        n = normalize(hit_pos - center);
+
+        // Give procedural spheres a distinctive color based on instance_id
+        // so we can visually verify each sphere has the correct instance mapping.
+        let id_f = f32(hit.instance_id);
+        base_color = vec3<f32>(
+            fract(id_f * 0.1234) * 0.5 + 0.3,
+            fract(id_f * 0.5678) * 0.5 + 0.3,
+            fract(id_f * 0.9012) * 0.5 + 0.3
+        );
+    } else {
+        // ═══ Triangle mesh shading ═══
+        n = compute_normal(hit.primitive_id);
+        // Base color from normal
+        base_color = abs(n) * 0.5 + 0.3;
+    }
 
     // Simple directional light + ambient
     let light_dir = normalize(vec3<f32>(0.5, 0.8, 0.3));
@@ -84,9 +109,6 @@ fn shade(ray: Ray, hit: RayHit) -> vec3<f32> {
     let shadow_ray = make_ray(hit_pos + n * 0.001, light_dir, 0.001, 100.0);
     let in_shadow = trace_shadow_ray(shadow_ray);
     let shadow_factor = select(1.0, 0.3, in_shadow);
-
-    // Base color from normal
-    let base_color = abs(n) * 0.5 + 0.3;
 
     // Ambient occlusion approximation via hemisphere ray
     let ambient = 0.15;
